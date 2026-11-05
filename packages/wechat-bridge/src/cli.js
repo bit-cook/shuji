@@ -5,17 +5,20 @@
  *   wechat-bridge --adapter http       --port 8080   # 通用 HTTP（OpenClaw 插件 / 人工排查）
  *   wechat-bridge --adapter telegram                 # Telegram 长轮询（无监听端口）
  *   wechat-bridge --adapter wecom     --port 8080    # 企业微信自建应用回调
+ *   wechat-bridge --adapter weixin                 # 微信（iLink）长轮询（无监听端口）
+ *   wechat-bridge --adapter weixin --login          # 微信扫码登录（一次性交互步骤）
  *   wechat-bridge --check                           # 只校验配置，不启动
  * 配置全部走环境变量（红线：密钥不入库不入镜像），见 deploy/env/wechat-bridge.env.example
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { createBridgeFromEnv, validateConfig } = require('./index');
+const { createBridgeFromEnv, validateConfig, runWeixinLogin } = require('./index');
 
 const USAGE = `枢机 · 命令路由（wechat-bridge）
 
 用法：
-  wechat-bridge [--adapter http|telegram|wecom] [--host H] [--port P] [--check]
+  wechat-bridge [--adapter http|telegram|wecom|weixin] [--host H] [--port P] [--check]
+  wechat-bridge --adapter weixin --login            # 微信扫码登录（一次性）
   wechat-bridge --help | --version
 
 环境变量（全部可选默认见 deploy/env/wechat-bridge.env.example）：
@@ -25,6 +28,11 @@ const USAGE = `枢机 · 命令路由（wechat-bridge）
   BRIDGE_TOKEN                              HTTP 端点 Bearer 令牌（配置后强制鉴权）
   AUDIT_LOG                                 审计日志路径（默认 audit.jsonl；none 关闭）
   CONFIRM_TTL_MS / RATE_LIMIT_PER_MIN / RATE_LIMIT_BURST
+
+微信（ADAPTER=weixin）：
+  WECHAT_BOT_TOKEN                          已登录得到的机器人令牌（也可由 --login 写入状态文件）
+  WECHAT_STATE_FILE                         令牌与同步游标持久化路径（绝对路径，0600）
+  WECHAT_API_BASE / WECHAT_BOT_TYPE         接入点 / 机器人类型（默认 3）
 `;
 
 function parseArgs(argv) {
@@ -63,6 +71,72 @@ if (args.check) {
     ? `配置校验通过（adapter=${r.adapter} 白名单 ${r.allowFrom.length} 人）\n`
     : `配置校验失败：${r.errors.length} 个问题\n`);
   process.exit(r.ok ? 0 : 1);
+}
+
+// 微信扫码登录：一次性交互步骤，与「启动长轮询」分开。
+// systemd 单元里没有人扫码，所以登录只能在有终端的机器上手动跑一次，
+// 产物（bot_token + 接入点 + 同步游标）落进 WECHAT_STATE_FILE（0600）。
+if (args.login) {
+  if (adapter !== 'weixin') {
+    process.stderr.write('--login 只用于 ADAPTER=weixin（扫码登录拿到机器人令牌）\n');
+    process.exit(1);
+  }
+  const stateFile = process.env.WECHAT_STATE_FILE;
+  if (!stateFile || !path.isAbsolute(stateFile)) {
+    process.stderr.write('扫码登录需要 WECHAT_STATE_FILE 为绝对路径（令牌是机密，不接受相对路径）\n');
+    process.exit(1);
+  }
+  let qrcodeTerminal;
+  try {
+    qrcodeTerminal = require('qrcode-terminal');
+  } catch {
+    qrcodeTerminal = null; // 没装依赖也能登录：降级为打印二维码链接
+  }
+  const readLine = (prompt) => new Promise((resolve) => {
+    process.stdout.write(prompt);
+    let input = '';
+    const onData = (chunk) => {
+      input += chunk.toString();
+      if (input.includes('\n')) {
+        process.stdin.removeListener('data', onData);
+        process.stdin.pause();
+        resolve(input.trim());
+      }
+    };
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', onData);
+  });
+  runWeixinLogin({
+    apiBase: process.env.WECHAT_API_BASE || undefined,
+    botType: process.env.WECHAT_BOT_TYPE || undefined,
+    stateFile,
+    print: (t) => process.stdout.write(t),
+    showQr: (url) => {
+      if (qrcodeTerminal) {
+        qrcodeTerminal.generate(url, { small: true });
+        process.stdout.write('\n若二维码无法显示或无法使用，可访问这个链接继续：\n' + url + '\n');
+      } else {
+        process.stdout.write('二维码链接（用手机微信打开）：\n' + url + '\n');
+      }
+    },
+    readVerifyCode: (prompt) => readLine(prompt),
+    timeoutMs: Number(process.env.WECHAT_LOGIN_TIMEOUT_MS) || 480000,
+  }).then((result) => {
+    process.stdout.write('\n登录成功。\n');
+    if (result.userId) {
+      process.stdout.write(`扫码账号 ID：${result.userId}\n`);
+      process.stdout.write(`把这个 ID 加进 WECHAT_ALLOW_FROM，否则白名单会拒绝它：\n`);
+      process.stdout.write(`  WECHAT_ALLOW_FROM=${process.env.WECHAT_ALLOW_FROM ? process.env.WECHAT_ALLOW_FROM + ',' + result.userId : result.userId}\n`);
+    }
+    if (result.alreadyConnected) {
+      process.stdout.write('（这个机器人此前已连接到枢机，令牌未变更）\n');
+    }
+    process.exit(0);
+  }).catch((e) => {
+    process.stderr.write('登录失败：' + String(e && e.message || e) + '\n');
+    process.exit(1);
+  });
 }
 
 let bridge;

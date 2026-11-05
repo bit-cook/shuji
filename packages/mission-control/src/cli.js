@@ -13,9 +13,12 @@ const path = require('node:path');
 
 const { createMissionControl, parseConfig, sqliteAvailable } = require('./index');
 
-let VERSION = '0.4.0';
+let VERSION = '0.0.0';
+// 注意路径是 ../package.json：cli.js 在 src/ 下，package.json 在包根。
+// 早先这里写成 ./package.json，解析到 src/package.json（不存在），
+// 于是每次都走 catch 退回硬编码版本号——发版改了 package.json 也不见生效。
 try {
-  const pkg = require('./package.json');
+  const pkg = require('../package.json');
   if (pkg && pkg.version) VERSION = pkg.version;
 } catch { /* 源码树被裁剪时退回内置版本号 */ }
 
@@ -38,6 +41,9 @@ function printHelp() {
     '  MC_HEARTBEATS_PER_AGENT  每 Agent 保留的心跳流水条数，默认 200（0 = 不清理，会告警）',
     '  MC_MAX_DETAIL_BYTES 心跳 detail 大小上限，默认 8192（防失灵的 Agent 撑爆库）',
     '  MC_RATE_LIMIT_PER_MIN / MC_RATE_LIMIT_BURST   每 IP 限流，默认 600 / 200',
+    '  MC_PANEL            网页可视化面板开关，1 开 0 关，默认开（只读）',
+    '  MC_PANEL_SESSION_TTL_MS   面板会话有效期，默认 43200000（12 小时）',
+    '  MC_PANEL_LOGIN_PER_MIN    面板登录尝试限流，默认每 IP 每分钟 5 次',
     '  LOG_LEVEL           debug | info | warn | error，默认 info',
     '',
     '端点：',
@@ -46,6 +52,12 @@ function printHelp() {
     '  GET  /api/costs/summary',
     '  POST /api/agents/heartbeat  POST /api/tasks',
     '  POST /api/tasks/<id>/claim  POST /api/tasks/<id>/complete',
+    '',
+    '网页面板（只读）：',
+    '  GET  /panel            面板页面（未登录时显示登录表单）',
+    '  POST /panel/login      用 MC_API_KEY 换会话 Cookie',
+    '  POST /panel/logout     作废会话 Cookie',
+    '  GET  /panel/api/snapshot   面板数据（需会话）',
     '',
   ].join('\n'));
 }

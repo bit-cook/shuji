@@ -25,6 +25,7 @@ const pexec = promisify(execFile);
 
 const { createMockMissionControl } = require('./mock-mission-control');
 const { createMockTelegram } = require('./mock-telegram');
+const { createMockIlink } = require('./mock-ilink');
 const { createBridgeFromEnv, listen } = require('../packages/wechat-bridge/src/index');
 const { createHttpAdapter } = require('../packages/wechat-bridge/src/adapters/http');
 const { createRouter } = require('../packages/wechat-bridge/src/core');
@@ -194,6 +195,49 @@ async function main() {
     }
     await tg.close();
 
+    // T23 微信（iLink）入口：枢机自己实现的连接，不经过 OpenClaw。
+    // 走 mock iLink 服务端，验四件事：白名单放行/拒绝、群聊不回复、
+    // 非文本消息不回复、以及 get_updates_buf 这个同步游标被原样回传。
+    const ilink = createMockIlink();
+    const wxPort = await ilink.listen();
+    const wxState = path.join(os.tmpdir(), `cardinal-e2e-wx-${Date.now()}.json`);
+    fs.writeFileSync(wxState, JSON.stringify({ token: 'wx-e2e-token' }), { mode: 0o600 });
+    const wxEnv = {
+      ...process.env,
+      MC_BASE, MC_API_KEY: 'e2e-key',
+      WECHAT_ALLOW_FROM: 'wx-me', TELEGRAM_ALLOW_FROM: '',
+      ADAPTER: 'weixin', WECHAT_API_BASE: `http://127.0.0.1:${wxPort}`,
+      WECHAT_STATE_FILE: wxState, AUDIT_LOG: auditFile,
+    };
+    const wxBridge = createBridgeFromEnv(wxEnv);
+    try {
+      ilink.pushUserText({ from: 'wx-me', text: '/ping' });
+      ilink.pushUserText({ from: 'wx-stranger', text: '/list' });
+      ilink.pushUserText({ from: 'wx-me', text: '/ping', groupId: '群-1' });
+      ilink.pushUserText({ from: 'wx-me', text: '', messageId: 'm-img' });
+      const wxDeadline = Date.now() + 5000;
+      while (ilink.state.sent.length < 2 && Date.now() < wxDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      const pongOk = ilink.state.sent[0] && ilink.state.sent[0].to_user_id === 'wx-me'
+        && /^pong/.test(ilink.state.sent[0].item_list[0].text_item.text);
+      const denyOk = ilink.state.sent[1] && ilink.state.sent[1].to_user_id === 'wx-stranger'
+        && /拒绝访问/.test(ilink.state.sent[1].item_list[0].text_item.text);
+      const noGroupReply = !ilink.state.sent.some((m) => m.item_list[0].text_item.text.match(/^pong/) && m.to_user_id === '群-1');
+      const noEmptyReply = ilink.state.sent.length === 2;
+      const bufOk = typeof ilink.state.lastGetUpdatesBody.get_updates_buf === 'string'
+        && ilink.state.lastGetUpdatesBody.get_updates_buf.length > 0;
+      report('T23', '微信 iLink：白名单放行/拒绝、群聊与空消息不回复', !!(pongOk && denyOk && noGroupReply && noEmptyReply),
+        `sent=${ilink.state.sent.length}`);
+      report('T24', '微信 iLink：同步游标 get_updates_buf 原样回传', bufOk,
+        `buf=${ilink.state.lastGetUpdatesBody.get_updates_buf}`);
+    } finally {
+      wxBridge.polling.stop();
+      fs.rmSync(wxState, { force: true });
+    }
+    await ilink.close();
+
     // T10 审计：每一步（含被拒）都留痕，且 confirm 链路带原文
     const auditLines = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     const results = auditLines.map((e) => e.result);
@@ -294,8 +338,9 @@ async function main() {
 
   console.log(`\n结果：${passed} 通过 / ${failed} 失败（共 ${passed + failed} 项）`);
   console.log('说明：T1–T14 用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器 /openclaw，带 Bearer）；');
-  console.log('      Telegram 走长轮询适配器；企业微信备份链路由 T14 覆盖。');
+  console.log('      Telegram 与微信（iLink）各走自己的长轮询适配器；企业微信备份链路由 T14 覆盖。');
   console.log('      T15–T22 打的是**真控制面**（真 SQLite + 真 sidecar 子进程 + 真 bridge 进程），验证持久化与心跳纠偏。');
+  console.log('      T25–T26 在真控制面上验网页面板：会话鉴权、防篡改、只读边界。');
   process.exit(failed === 0 ? 0 : 1);
 }
 
@@ -474,6 +519,40 @@ async function realControlPlaneSection() {
     const auditOk = fs.existsSync(auditFile) && !fs.readFileSync(auditFile, 'utf8').includes(MC_KEY);
     report('T22', '真控制面：审计留痕且不含 API Key',
       auditOk, auditFile);
+
+    // 网页面板：真控制面上跑一遍完整会话——登录换 Cookie、快照拿到真实汇总、
+    // 篡改 Cookie 被拒、面板会话不能顶替 Bearer。
+    const panelPage = await fetch(MC_BASE + '/panel');
+    const pageHtml = await panelPage.text();
+    const loginRes = await fetch(MC_BASE + '/panel/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: MC_KEY }),
+    });
+    const setCookie = loginRes.headers.get('set-cookie') || '';
+    const panelCookie = (setCookie.match(/cardinal_panel=([^;]*)/) || [])[1] || '';
+    const snapRes = await fetch(MC_BASE + '/panel/api/snapshot', {
+      headers: { cookie: 'cardinal_panel=' + panelCookie },
+    });
+    const snap = snapRes.status === 200 ? await snapRes.json() : {};
+    const noSession = await fetch(MC_BASE + '/panel/api/snapshot');
+    const tampered = await fetch(MC_BASE + '/panel/api/snapshot', {
+      headers: { cookie: 'cardinal_panel=' + panelCookie.split('.').slice(0, 2).join('.') + '.AAAA' },
+    });
+    const bearerHijack = await fetch(MC_BASE + '/api/agents', {
+      headers: { cookie: 'cardinal_panel=' + panelCookie },
+    });
+    const panelWrite = await fetch(MC_BASE + '/panel/api/tasks', {
+      method: 'POST', headers: { cookie: 'cardinal_panel=' + panelCookie, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    report('T25', '网页面板：登录换会话、快照有真实数据、无会话 401',
+      panelPage.status === 200 && /枢机 · 控制面板/.test(pageHtml)
+      && loginRes.status === 200 && snapRes.status === 200
+      && snap.totals && snap.totals.agents >= 1 && noSession.status === 401,
+      `agents=${snap.totals ? snap.totals.agents : '?'} tokens=${snap.totals ? snap.totals.tokens : '?'}`);
+    report('T26', '网页面板：Cookie 防篡改 + 会话不顶替 Bearer + 面板只读',
+      tampered.status === 401 && bearerHijack.status === 401 && panelWrite.status === 404,
+      `tampered=${tampered.status} bearerHijack=${bearerHijack.status} panelWrite=${panelWrite.status}`);
   } finally {
     mc.kill('SIGTERM');
     await new Promise((r) => setTimeout(r, 300));

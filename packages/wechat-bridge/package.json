@@ -1,7 +1,7 @@
 {
   "name": "wechat-bridge",
-  "version": "0.2.0",
-  "description": "枢机 · Cardinal — 命令路由：微信 → Mission-Control 控制面（白名单 / 六条命令 / 危险命令二次确认 / 审计）",
+  "version": "0.3.0",
+  "description": "枢机 · Cardinal — 命令路由：微信（iLink 原生）/ Telegram / 企业微信 / HTTP 多入口（白名单 / 八条命令 / 危险命令二次确认 / 审计）",
   "license": "MIT",
   "main": "src/index.js",
   "bin": {
@@ -12,5 +12,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0"
   }
 }

@@ -6,11 +6,15 @@ const { createConfirmStore } = require('./confirm');
 const { createHttpAdapter } = require('./adapters/http');
 const { createWecomAdapter, createWecomNotifier, listen } = require('./adapters/wecom');
 const { createTelegramAdapter } = require('./adapters/telegram');
+const { createWeixinAdapter, readState } = require('./adapters/weixin');
+const { runWeixinLogin } = require('./ilink-login');
 const { createRateLimiter } = require('./ratelimit');
 const { createStats } = require('./stats');
 const { createLogger } = require('./log');
+const fs = require('node:fs');
+const path = require('node:path');
 
-const ADAPTERS = ['http', 'telegram', 'wecom'];
+const ADAPTERS = ['http', 'telegram', 'wecom', 'weixin'];
 
 /** 配置错误：与 mission-control 的 ConfigError 同构，便于两层用同一套处理。 */
 class ConfigError extends Error {
@@ -73,6 +77,20 @@ function validateConfig(env = process.env) {
       if (!env[k]) errors.push(`ADAPTER=wecom 需要 ${k}`);
     }
   }
+  if (adapter === 'weixin') {
+    // 令牌可以来自环境变量，也可以来自扫码登录后持久化的状态文件。两处都没有
+    // 说明这个进程还没登录过——它会启动成功然后一条消息也收不到，所以启动时就挡下。
+    const stateFile = env.WECHAT_STATE_FILE || '';
+    const hasState = stateFile && readState(stateFile);
+    if (!env.WECHAT_BOT_TOKEN && !hasState) {
+      errors.push(
+        'ADAPTER=weixin 但没有可用令牌：既没有 WECHAT_BOT_TOKEN，也没有扫码登录过的状态文件。\n' +
+        '  先在有终端的机器上执行：wechat-bridge --adapter weixin --login（扫码后令牌写入 WECHAT_STATE_FILE）');
+    }
+    if (stateFile && !path.isAbsolute(stateFile)) {
+      errors.push('WECHAT_STATE_FILE 必须是绝对路径（令牌是机密，不接受相对路径随工作目录漂移）');
+    }
+  }
   // 一个进程只跑一个适配器，白名单取并集不会越权（微信消息到不了 telegram 适配器）。
   // 但「当前适配器自己的白名单是空的」意味着这个进程永远服务不了任何真实用户——
   // 没有一种正当配置长这样，所以按错误处理：起来也是白起来，还不如启动失败。
@@ -80,7 +98,7 @@ function validateConfig(env = process.env) {
     errors.push('ADAPTER=telegram 但 TELEGRAM_ALLOW_FROM 为空：Telegram 消息只会到达这个适配器，白名单为空则所有用户都会被拒（服务能启动，但永远服务不了任何人）');
   }
   if (adapter !== 'telegram' && wechatFrom.length === 0) {
-    errors.push(`ADAPTER=${adapter} 但 WECHAT_ALLOW_FROM 为空：${adapter === 'wecom' ? '企业微信' : 'HTTP/OpenClaw'} 消息只会到达这个适配器，白名单为空则所有用户都会被拒（服务能启动，但永远服务不了任何人）`);
+    errors.push(`ADAPTER=${adapter} 但 WECHAT_ALLOW_FROM 为空：${adapter === 'wecom' ? '企业微信' : adapter === 'weixin' ? '微信' : 'HTTP/OpenClaw'} 消息只会到达这个适配器，白名单为空则所有用户都会被拒（服务能启动，但永远服务不了任何人）`);
   }
   if (adapter !== 'telegram') {
     const host = env.HOST || '127.0.0.1';
@@ -103,7 +121,8 @@ function validateConfig(env = process.env) {
 
 /** 红线：默认禁止把 HTTP 适配器绑到公网地址（0.0.0.0 / ::），需显式 ALLOW_PUBLIC_BIND=1  opted-in。 */
 function guardPublicBind(host, adapter, env = process.env) {
-  if (adapter === 'telegram') return; // 长轮询出站，无监听面
+  // 长轮询出站（telegram / weixin），没有监听面可言
+  if (adapter === 'telegram' || adapter === 'weixin') return;
   const h = String(host || '').toLowerCase();
   const wildcard = h === '0.0.0.0' || h === '::' || h === '[::]' || h === '';
   if (!wildcard) return;
@@ -166,18 +185,31 @@ function createBridgeFromEnv(env = process.env) {
   const port = Number(env.PORT || 8080);
   const host = env.HOST || '127.0.0.1';
 
-  if (adapter === 'telegram') {
-    const telegram = createTelegramAdapter({
-      router,
-      token: env.TELEGRAM_BOT_TOKEN,
-      apiBase: env.TELEGRAM_API_BASE || 'https://api.telegram.org',
-      pollTimeout: num(env.TELEGRAM_POLL_TIMEOUT, 30),
-      drainBacklog: env.TELEGRAM_DRAIN_BACKLOG !== '0',
-      validateToken: env.TELEGRAM_VALIDATE_TOKEN === '1',
-      logger,
-    });
-    const polling = telegram.start();
-    return { router, telegram, polling, stats, logger };
+  if (adapter === 'telegram' || adapter === 'weixin') {
+    // 长轮询类适配器共用的启动形状：都没有监听端口，bridge 返回 polling 句柄
+    // 供 cli.js 的 SIGTERM 处理器调用 stop()。
+    const polling = adapter === 'telegram'
+      ? createTelegramAdapter({
+        router,
+        token: env.TELEGRAM_BOT_TOKEN,
+        apiBase: env.TELEGRAM_API_BASE || 'https://api.telegram.org',
+        pollTimeout: num(env.TELEGRAM_POLL_TIMEOUT, 30),
+        drainBacklog: env.TELEGRAM_DRAIN_BACKLOG !== '0',
+        validateToken: env.TELEGRAM_VALIDATE_TOKEN === '1',
+        logger,
+      }).start()
+      : createWeixinAdapter({
+        router,
+        token: env.WECHAT_BOT_TOKEN || undefined,
+        stateFile: env.WECHAT_STATE_FILE || undefined,
+        apiBase: env.WECHAT_API_BASE || undefined,
+        botType: env.WECHAT_BOT_TYPE || undefined,
+        logger,
+      }).start();
+    return {
+      router, polling, stats, logger, adapter,
+      ...(adapter === 'weixin' ? { weixin: polling } : { telegram: polling }),
+    };
   }
 
   guardPublicBind(host, adapter, env);
@@ -213,6 +245,6 @@ function createBridgeFromEnv(env = process.env) {
 
 module.exports = {
   createRouter, createMcClient, createAudit, createConfirmStore,
-  createHttpAdapter, createWecomAdapter, createWecomNotifier, createTelegramAdapter,
-  createBridgeFromEnv, listen, validateConfig, ADAPTERS, ConfigError,
+  createHttpAdapter, createWecomAdapter, createWecomNotifier, createTelegramAdapter, createWeixinAdapter,
+  createBridgeFromEnv, listen, validateConfig, ADAPTERS, ConfigError, runWeixinLogin,
 };

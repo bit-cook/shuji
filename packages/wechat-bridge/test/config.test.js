@@ -253,3 +253,58 @@ test('validateConfig：PORT=0 允许（内核挑端口）但告警，非数字�
   assert.equal(validateConfig({ ...BASE, PORT: 'abc' }).ok, false);
   assert.equal(validateConfig({ ...BASE, PORT: '99999' }).ok, false);
 });
+
+// ---- 微信（iLink）适配器：ADAPTER=weixin ----
+const WX = { ADAPTER: 'weixin', WECHAT_ALLOW_FROM: 'wx-me' };
+
+test('validateConfig：ADAPTER=weixin 没有令牌也没有登录态 → 启动即失败', () => {
+  // 这个进程会启动成功然后一条消息也收不到，所以启动时就挡下，并指路 --login。
+  const r = validateConfig({ ...BASE, ...WX });
+  assert.equal(r.ok, false, JSON.stringify(r.errors));
+  assert.ok(r.errors.some((e) => /没有可用令牌/.test(e)), JSON.stringify(r.errors));
+  assert.ok(r.errors.some((e) => /--login/.test(e)), JSON.stringify(r.errors));
+});
+
+test('validateConfig：ADAPTER=weixin 有 WECHAT_BOT_TOKEN 即可启动', () => {
+  const r = validateConfig({ ...BASE, ...WX, WECHAT_BOT_TOKEN: 'tok' });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test('validateConfig：ADAPTER=weixin 有登录态文件即可启动', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cardinal-cfg-')), 'state.json');
+  fs.writeFileSync(file, JSON.stringify({ token: 'tok-from-disk' }), { mode: 0o600 });
+  const r = validateConfig({ ...BASE, ...WX, WECHAT_STATE_FILE: file });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test('validateConfig：WECHAT_STATE_FILE 必须是绝对路径', () => {
+  const r = validateConfig({ ...BASE, ...WX, WECHAT_BOT_TOKEN: 'tok', WECHAT_STATE_FILE: 'state.json' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /WECHAT_STATE_FILE 必须是绝对路径/.test(e)), JSON.stringify(r.errors));
+});
+
+test('validateConfig：ADAPTER=weixin 却没配微信白名单 → 启动即失败', () => {
+  const r = validateConfig({ ...NO_WECHAT, ADAPTER: 'weixin', WECHAT_BOT_TOKEN: 'tok' });
+  assert.equal(r.ok, false, JSON.stringify(r.errors));
+  assert.ok(r.errors.some((e) => /WECHAT_ALLOW_FROM 为空/.test(e)), JSON.stringify(r.errors));
+  assert.ok(r.errors.some((e) => /微信/.test(e)), JSON.stringify(r.errors));
+});
+
+test('装配：ADAPTER=weixin 起长轮询、不监听端口', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cardinal-cfg-')), 'state.json');
+  fs.writeFileSync(file, JSON.stringify({ token: 'tok-disk' }), { mode: 0o600 });
+  const b = createBridgeFromEnv({ ...BASE, ...WX, WECHAT_STATE_FILE: file });
+  try {
+    assert.ok(b.polling, '应返回轮询句柄');
+    assert.equal(b.server, undefined, '长轮询适配器没有监听端口');
+    assert.equal(b.adapter, 'weixin');
+  } finally {
+    b.polling.stop();
+  }
+});

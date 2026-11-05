@@ -2,6 +2,79 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号语义化。
 
+## [0.6.0] - 2026-11-05
+
+主题：**微信入口改为枢机原生实现，并加上网页面板**。两条都不新增依赖式的前提——
+微信不再以「先装好 OpenClaw」为条件；面板不新开端口、不引入第二条写路径。
+
+全量回归：255 项单测 + T1–T26 端到端，CI 六 job 全绿。
+
+### 新增：微信（iLink）入口，枢机自己实现
+
+- **`packages/wechat-bridge/src/ilink.js`**：iLink bot 协议客户端（HTTP + 长轮询 +
+  Bearer）。参照 OpenClaw 官方微信通道（`@tencent-weixin/openclaw-weixin`）的连接方式
+  直接实现，不依赖、也不需要安装 OpenClaw。端点：`get_bot_qrcode` /
+  `get_qrcode_status` / `getupdates` / `sendmessage`；请求头带
+  `iLink-App-Id`、`iLink-App-ClientVersion`（uint32 的 `0x00MMNNPP` 编码）、
+  `AuthorizationType`、`X-WECHAT-UIN`
+- **`src/adapters/weixin.js`**：适配器，形状与 Telegram 适配器同构（出站长轮询、
+  指数退避、优雅停机），因此可以直接插进 `createBridgeFromEnv`
+- **两个必须照做的协议细节，错了都是静默故障**：
+  - `message_id` / `msg_id` / `svr_id` 是 uint64，超出 2^53 后 JS number 会丢精度。
+    对端 JSON 里它们是裸数字，直接 `JSON.parse` 就把 ID 改了。`parseLossless()`
+    先把这些字段替换成字符串再解析（只改真正的对象属性，不碰字符串内容里的同名字样）
+  - `get_updates_buf` 是服务端同步游标，必须原样回传并持久化。丢了它服务端会重放
+    积压——表现为把用户下线期间发的命令重新执行一遍
+- **扫码登录 `--login`**（`src/ilink-login.js` + CLI）：一次性交互步骤，状态机逐分支
+  照对端实际返回的 status 处理（`wait` / `scaned` / `need_verifycode` / `expired` /
+  `verify_code_blocked` / `binded_redirect` / `scaned_but_redirect` / `confirmed`）。
+  两处不看源码就会踩：`scaned_but_redirect` 带 `redirect_host`，接入点必须切过去，
+  否则表现为扫了码但一直没下文；`binded_redirect` 表示这个机器人已绑到枢机名下、
+  服务端不再发新令牌，这属于成功而不是失败
+- 登录产物（令牌、接入点、同步游标）落 `WECHAT_STATE_FILE`，原子写入 + 0600。
+  服务端下发的 `ilink_user_id`（扫码账号 ID）会原样打印，直接抄进 `WECHAT_ALLOW_FROM`
+- 群聊（`group_id` 非空）显式忽略：机器人被拉进群后，陌生成员会触发「拒绝访问」并回
+  在群里，既刷屏又等于向全群公告白名单的存在。图片/语音/文件同样显式忽略（命令协议
+  是纯文本）
+- `ret != 0` 的服务端应答按异常抛出交给退避，不当作「没有消息」——否则令牌失效、
+  账号被封这类故障表现为「机器人在线但谁都不理」
+- 部署：`deploy/systemd/wechat-bridge-weixin.service`、用户作用域同款单元、
+  `deploy/env/wechat-bridge-weixin.env.example`、`install.sh`（新单元 + 令牌目录 700 +
+  依赖安装 + 卸载清理）、docker-compose 服务与卷、Dockerfile 安装生产依赖
+- 新增唯一第三方依赖 `qrcode-terminal@0.12.0`（扫码登录在终端画二维码用，
+  OpenClaw 官方微信通道同一个库）；CI 的 bridge job 增加 `npm ci`
+
+### 新增：网页面板（只读）
+
+- **`packages/mission-control/src/panel.js` + `panel-page.js`**：挂在控制面同一个 HTTP
+  服务上，不新开端口、不新开监听面，因此自动继承默认只绑 `127.0.0.1`、每 IP 令牌桶
+  限流、全量审计三件事
+- **鉴权**：浏览器不方便每次带头，所以用一次性交换——`POST /panel/login` 拿
+  `MC_API_KEY` 换一个 HttpOnly + SameSite=Strict 的会话 Cookie。Cookie 是
+  `<会话号>.<过期时间>.<HMAC>`，HMAC 用 `MC_API_KEY` 对前两段签名：改任何一段签名
+  就对不上；过期时间在签名里，时钟到了服务端就不认；不知道 `MC_API_KEY` 伪造不出
+  合法 Cookie。全程 constant-time 比较，登录失败按 IP 限流（默认每 IP 每分钟 5 次，
+  限流后连正确密钥也进不去——这正是防爆破想要的行为）
+- **只读**：面板只暴露 GET 快照，不提供下发任务、领取、回报的入口。写操作一律回到
+  命令入口走危险命令二次确认（60 秒一次性令牌、仅发起人可用、全量审计）。面板不引入
+  第二条写路径，也就不引入 CSRF 面
+- 快照只回渲染所需字段：Agent 心跳详情里可能带命令原文，不进浏览器
+- 配置：`MC_PANEL`（0 关）、`MC_PANEL_SESSION_TTL_MS`（默认 12 小时）、
+  `MC_PANEL_LOGIN_PER_MIN`
+- 可视化遵循数据可视化规范：深浅两套色值都是挑选出来的（不是反转浅色）、状态色固定
+  且必须图标 + 文字同时出现（浅色面上的告警黄对比度只有 1.79:1，不允许只靠颜色传达
+  状态）、文字一律用文本色不穿数据色、单序列图表不放图例而每条柱子在端头直接标数值、
+  必须有一份表格视图、表格用 tabular-nums
+
+### 修复
+
+- **`mission-control` 的 `--version` 永远是硬编码的 `0.4.0`**：cli.js 里
+  `require('./package.json')` 实际解析到 `src/package.json`（不存在），每次都走 catch
+  退回内置版本号，发版改了 package.json 也不见生效
+- `getUpdates` 遇到服务端 `ret != 0` 时当作空响应继续轮询（见上）
+- iLink 客户端构造时传入的 `token` 此前没有作为默认鉴权头使用，导致 `getUpdates` 等
+  调用发出的请求不带 `Authorization`
+
 ## [0.5.0] - 2026-11-05
 
 主题：**常驻系统的体积与「配了却没生效」**。这一版不动功能，专治两类只有跑久了

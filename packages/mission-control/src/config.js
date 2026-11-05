@@ -24,6 +24,9 @@ const DEFAULTS = {
   maxDetailBytes: 8192, // 心跳 detail 的大小上限，防失灵的 Agent 把库撑爆
   maxTaskTitle: 4000,
   requestTimeoutMs: 10000,
+  panel: true,                 // 网页可视化面板（只读），MC_PANEL=0 关闭
+  panelSessionTtlMs: 12 * 60 * 60 * 1000, // 面板会话有效期
+  panelLoginPerMin: 5,         // 面板登录尝试限流（每 IP 每分钟）
 };
 
 class ConfigError extends Error {
@@ -131,11 +134,25 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
 
   const logLevel = String(env.LOG_LEVEL || env.MC_LOG_LEVEL || 'info').toLowerCase();
 
+  // 面板开关只认精确值，拼成 yes/on 会静默按默认值走（该开的没开）
+  const panelRaw = String(env.MC_PANEL ?? '').trim();
+  if (panelRaw && !['0', '1'].includes(panelRaw)) {
+    errors.push(`MC_PANEL 只能是 0 或 1，当前为 ${env.MC_PANEL}`);
+  }
+  const panel = panelRaw !== '0';
+
+  const panelSessionTtlMs = Math.floor(num(env.MC_PANEL_SESSION_TTL_MS, DEFAULTS.panelSessionTtlMs));
+  if (panelSessionTtlMs < 60000) errors.push('MC_PANEL_SESSION_TTL_MS 至少 60000（1 分钟）');
+
+  const panelLoginPerMin = Math.floor(num(env.MC_PANEL_LOGIN_PER_MIN, DEFAULTS.panelLoginPerMin));
+  if (panelLoginPerMin < 1) errors.push('MC_PANEL_LOGIN_PER_MIN 至少为 1');
+
   // 拼错的数字一律报错，不静默回落默认值
   for (const key of [
     'MC_AUDIT_MAX_BYTES', 'MC_AUDIT_KEEP', 'MC_RATE_LIMIT_PER_MIN', 'MC_RATE_LIMIT_BURST',
     'MC_MAX_BODY_BYTES', 'MC_STALE_SEC', 'MC_TASKS_PER_AGENT', 'MC_MAX_TASK_TITLE',
     'MC_REQUEST_TIMEOUT_MS', 'MC_HEARTBEATS_PER_AGENT', 'MC_MAX_DETAIL_BYTES',
+    'MC_PANEL_SESSION_TTL_MS', 'MC_PANEL_LOGIN_PER_MIN',
   ]) {
     if (!isNumericLiteral(env[key])) errors.push(`${key} 不是数字：${env[key]}`);
   }
@@ -169,6 +186,9 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
       maxTaskTitle,
       requestTimeoutMs: Math.floor(num(env.MC_REQUEST_TIMEOUT_MS, DEFAULTS.requestTimeoutMs)),
       logLevel,
+      panel,
+      panelSessionTtlMs,
+      panelLoginPerMin,
     },
     errors,
     warnings,

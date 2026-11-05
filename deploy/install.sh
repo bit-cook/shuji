@@ -25,10 +25,11 @@ done
 
 # 落盘 + 建最小权限账号的组件
 COMPONENTS=(mission-control wechat-bridge hermes-sidecar)
-# systemd 单元比组件多一个：Telegram 入口与 HTTP 入口共用 wechat-bridge 账号、
+# systemd 单元比组件多两个：Telegram 与微信（iLink）入口共用 wechat-bridge 账号、
 # 同一份代码与日志目录，只有环境文件（令牌 / 白名单 / 审计文件名）不同——
-# 一个进程只跑一个适配器，所以必须是两个单元，但不必多一个账号。
-SERVICES=(mission-control wechat-bridge wechat-bridge-telegram hermes-sidecar)
+# 一个进程只跑一个适配器，所以必须各自一个单元，但不必多一个账号。
+# 微信入口另有 /var/lib/wechat-bridge-weixin 存放扫码登录得到的令牌（0600）。
+SERVICES=(mission-control wechat-bridge wechat-bridge-telegram wechat-bridge-weixin hermes-sidecar)
 
 run() { if [[ $DRY_RUN -eq 1 ]]; then echo "[dry-run] $*"; else "$@"; fi }
 confirm() {
@@ -48,6 +49,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   run systemctl daemon-reload
   confirm "删除落盘文件 ${COMPONENTS[*]}？" || { echo "保留文件，仅卸载服务"; exit 0; }
   for c in "${COMPONENTS[@]}"; do run rm -rf "$DEST/$c"; done
+  run rm -rf /var/lib/wechat-bridge-weixin
   run rm -f /etc/logrotate.d/wechat-bridge /etc/logrotate.d/mission-control
   echo "已完成。系统账号 ${COMPONENTS[*]} 未删除（如需：userdel）。"
   echo "环境文件 /etc/{$(IFS=,; echo "${SERVICES[*]}")}.env 未删除（含密钥，请自行处置）。"
@@ -72,11 +74,21 @@ done
 
 # 2. 落盘组件
 run mkdir -p "$DEST/mission-control" "$DEST/wechat-bridge" "$DEST/hermes-sidecar" \
-  /var/log/wechat-bridge /var/log/mission-control /var/lib/mission-control
+  /var/log/wechat-bridge /var/log/mission-control /var/lib/mission-control \
+  /var/lib/wechat-bridge-weixin
 run cp -r "$REPO_ROOT/packages/mission-control/src" "$REPO_ROOT/packages/mission-control/package.json" "$DEST/mission-control/"
-run cp -r "$REPO_ROOT/packages/wechat-bridge/src" "$REPO_ROOT/packages/wechat-bridge/package.json" "$DEST/wechat-bridge/"
+run cp -r "$REPO_ROOT/packages/wechat-bridge/src" "$REPO_ROOT/packages/wechat-bridge/package.json" \
+  "$REPO_ROOT/packages/wechat-bridge/package-lock.json" "$DEST/wechat-bridge/"
 run cp "$REPO_ROOT/packages/hermes-sidecar/sidecar.py" "$DEST/hermes-sidecar/"
 run chmod 644 "$DEST/hermes-sidecar/sidecar.py"
+# 微信扫码登录要在终端渲染二维码，用 qrcode-terminal（OpenClaw 官方微信通道同一个库）。
+# 只装生产依赖，不把 devDependencies 拖进 /opt。
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "[dry-run] 在 $DEST/wechat-bridge 安装生产依赖（qrcode-terminal）"
+else
+  (cd "$DEST/wechat-bridge" && npm ci --omit=dev --no-audit --no-fund) \
+    || { echo "[错误] wechat-bridge 依赖安装失败" >&2; exit 1; }
+fi
 
 # 3. systemd 单元（路径按 DEST 重写）。Telegram 入口共用 wechat-bridge 账号，
 #    但它自己的单元里 User=wechat-bridge 已写死，这里只换路径前缀。
@@ -101,6 +113,9 @@ for c in "${COMPONENTS[@]}"; do
   run chown -R "$c:$c" "$DEST/$c"
 done
 run chown -R wechat-bridge:wechat-bridge /var/log/wechat-bridge
+run chown -R wechat-bridge:wechat-bridge /var/lib/wechat-bridge-weixin
+# 微信令牌目录：只有属主能进（内有机器人令牌与同步游标）
+run chmod 700 /var/lib/wechat-bridge-weixin
 run chown -R mission-control:mission-control /var/log/mission-control /var/lib/mission-control
 # 控制面数据目录只允许属主进入（内含 Agent 明细与任务标题）
 run chmod 750 /var/lib/mission-control
@@ -143,5 +158,10 @@ echo "接下来："
 echo "  1. 如自检有缺失：cp $REPO_ROOT/deploy/env/<组件>.env.example /etc/<组件>.env && chmod 600 /etc/<组件>.env"
 echo "  2. systemctl enable --now mission-control            # 先起控制面"
 echo "  3. systemctl enable --now wechat-bridge wechat-bridge-telegram hermes-sidecar"
-echo "  4. journalctl -u mission-control -u wechat-bridge -u wechat-bridge-telegram -u hermes-sidecar -f"
-echo "  5. 校验监听未暴露公网：ss -tlnp | grep -E '3000|8080'"
+echo "  4. 微信入口先扫码登录（一次性交互步骤，systemd 里没有人扫码）："
+echo "       sudo -u wechat-bridge WECHAT_STATE_FILE=/var/lib/wechat-bridge-weixin/state.json \\"
+echo "         WECHAT_ALLOW_FROM=你的微信用户ID node $DEST/wechat-bridge/src/cli.js --adapter weixin --login"
+echo "     登录成功后把打印出来的「扫码账号 ID」填进 /etc/wechat-bridge-weixin.env 的 WECHAT_ALLOW_FROM，"
+echo "     再执行 systemctl enable --now wechat-bridge-weixin"
+echo "  5. journalctl -u mission-control -u wechat-bridge -u wechat-bridge-telegram -u wechat-bridge-weixin -u hermes-sidecar -f"
+echo "  6. 校验监听未暴露公网：ss -tlnp | grep -E '3000|8080'"

@@ -18,6 +18,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/wechat-bridge/package-lock.json
+      # 微信扫码登录要在终端画二维码，用 qrcode-terminal（OpenClaw 官方微信通道同一个库）。
+      # 装不上也不该让其余测试陪葬：登录相关的 CLI 路径自己会降级成打印链接。
+      - name: npm ci
+        run: npm ci || echo "::warning::依赖安装失败，CLI --login 的二维码渲染将不可用"
+        working-directory: packages/wechat-bridge
       # 语法自检：所有源码文件都能被 Node 解析
       - name: node --check 全部源码
         run: |

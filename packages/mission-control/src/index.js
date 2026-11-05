@@ -9,6 +9,7 @@ const path = require('node:path');
 const { parseConfig, ConfigError, DEFAULTS, guardPublicBind } = require('./config');
 const { createStore, sqliteAvailable } = require('./store');
 const { createControlServer } = require('./server');
+const { createPanel } = require('./panel');
 const { createLogger, createNoopLogger } = require('./log');
 const { createAudit } = require('./audit');
 const { createStats } = require('./stats');
@@ -65,12 +66,26 @@ function createMissionControl({
       burst: config.rateLimitBurst,
       now,
     }),
+    // 网页可视化面板：挂在同一个服务上，继承绑定限制、限流与审计
+    panel: config.panel ? createPanel({
+      store,
+      config,
+      logger: log,
+      now,
+      sessionTtlMs: config.panelSessionTtlMs,
+      loginLimiter: createRateLimiter({
+        perMinute: config.panelLoginPerMin,
+        burst: config.panelLoginPerMin,
+        now,
+      }),
+    }) : null,
   });
 
   return {
     config,
     store,
     http,
+    panel: http.panel,
     warnings,
     listen: (port = config.port, host = config.host) => http.listen(port, host),
     close: async () => {
@@ -88,5 +103,6 @@ module.exports = {
   guardPublicBind,
   createStore,
   createControlServer,
+  createPanel,
   sqliteAvailable,
 };

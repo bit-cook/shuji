@@ -2,7 +2,8 @@
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY packages/wechat-bridge/package.json ./packages/wechat-bridge/package.json
+COPY packages/wechat-bridge/package.json packages/wechat-bridge/package-lock.json ./packages/wechat-bridge/
+RUN cd packages/wechat-bridge && npm ci --omit=dev --no-audit --no-fund
 COPY packages/wechat-bridge/src ./packages/wechat-bridge/src
 # 非 root 运行（红线：禁止 root 常驻）；node 镜像自带 node 用户
 USER node

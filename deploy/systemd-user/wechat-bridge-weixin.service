@@ -1,0 +1,23 @@
+[Unit]
+Description=Shuji WeChat Command Bridge (微信 iLink 入口)
+After=network-online.target cardinal-mission-control.service
+Wants=network-online.target
+
+# 启动即失败（如未登录、白名单空）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/shuji/deploy/env/wechat-bridge-weixin.env
+ExecStart=/usr/bin/node %h/shuji/packages/wechat-bridge/src/cli.js --adapter weixin
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

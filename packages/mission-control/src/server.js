@@ -119,6 +119,7 @@ function createControlServer({
   audit,
   stats,
   rateLimiter,
+  panel,
   now = () => Date.now(),
   nowIso = () => new Date().toISOString(),
   httpImpl = http,
@@ -226,6 +227,53 @@ function createControlServer({
       return;
     }
 
+    // 面板走自己的会话 Cookie 鉴权，与 /api/* 的 Bearer 是两条独立的门。
+    // 放在限流之后、Bearer 门之前：面板因此也受每 IP 限流与全量审计约束，
+    // 且不会被「缺 Bearer 头就 401」挡在登录页之外。
+    const panelHit = panel ? panel.match(req.method, pathname) : null;
+    if (panelHit) {
+      readBody(req, maxBody).then((body) => {
+        let out;
+        try {
+          out = panelHit.fn(body, req, ip);
+        } catch (e) {
+          entry.status = 500;
+          entry.error = String((e && e.message) || e);
+          counter.request(panelHit.route, 500);
+          recorder.record(entry);
+          log.error('panel route threw', { route: panelHit.route, error: entry.error });
+          sendJson(res, 500, { message: 'internal error' });
+          return;
+        }
+        entry.status = out.status;
+        entry.ms = now() - started;
+        counter.request(panelHit.route, out.status);
+        recorder.record(entry);
+        if (out.headers && out.headers['Content-Type']) {
+          // 页面是 HTML，不能走 sendJson 的 JSON 序列化
+          const text = String(out.body);
+          try {
+            res.writeHead(out.status, {
+              'Content-Type': out.headers['Content-Type'],
+              'Content-Length': Buffer.byteLength(text),
+              'Cache-Control': 'no-store',
+              ...(out.headers['Set-Cookie'] ? { 'Set-Cookie': out.headers['Set-Cookie'] } : {}),
+            });
+            res.end(text);
+          } catch { /* 客户端已断开 */ }
+          return;
+        }
+        sendJson(res, out.status, out.body, out.headers);
+      }).catch((e) => {
+        entry.status = 400;
+        entry.error = String((e && e.message) || e);
+        counter.request(panelHit.route, 400);
+        recorder.record(entry);
+        sendJson(res, 400, { message: 'bad request' });
+      });
+      return;
+    }
+
     const hit = resolve(req.method, pathname);
     if (!hit) {
       entry.status = 404;
@@ -300,6 +348,7 @@ function createControlServer({
   return {
     server,
     handler,
+    panel,
     stats: counter,
     audit: recorder,
     routes: routes.map(([m, p]) => `${m} ${p}`),

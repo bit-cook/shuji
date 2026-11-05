@@ -73,8 +73,36 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs: [/tmp]
 
+  # 命令路由 · 微信入口（枢机自己实现的 iLink 连接，不依赖 OpenClaw）。
+  # 注意：扫码登录是一次性交互步骤，容器里做不了——先在宿主机以 wechat-bridge
+  # 账号跑一次 --login 生成 state.json，再把它以卷的形式挂进来：
+  #   sudo -u wechat-bridge WECHAT_STATE_FILE=... node .../cli.js --adapter weixin --login
+  #   docker run -v bridge-weixin-state:/var/lib/wechat-bridge-weixin … （或 bind mount）
+  wechat-bridge-weixin:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.bridge
+    env_file: ./env/wechat-bridge-weixin.env   # 机器人令牌在状态文件里，不在这里重复
+    environment:
+      MC_BASE: http://mission-control:3000
+      ADAPTER: weixin
+      AUDIT_LOG: /var/log/wechat-bridge/weixin-audit.jsonl
+      WECHAT_STATE_FILE: /var/lib/wechat-bridge-weixin/state.json
+    volumes:
+      - bridge-logs-weixin:/var/log/wechat-bridge
+      - bridge-weixin-state:/var/lib/wechat-bridge-weixin   # 扫码登录得到的令牌（0600）
+    depends_on:
+      - mission-control
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+
 volumes:
   bridge-logs:
   bridge-logs-telegram:
+  bridge-logs-weixin:
+  bridge-weixin-state:
   mc-data:
   mc-logs:

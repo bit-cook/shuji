@@ -1,0 +1,30 @@
+[Unit]
+Description=Shuji WeChat Command Bridge (微信 iLink 入口)
+After=network-online.target mission-control.service
+Wants=network-online.target
+
+# 启动即失败（如未登录、白名单空）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wechat-bridge-weixin.env
+ExecStart=/usr/bin/node /opt/wechat-bridge/src/cli.js --adapter weixin
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+# 最小权限（红线：禁止 root 常驻）
+User=wechat-bridge
+Group=wechat-bridge
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 令牌与同步游标落在这里（0600）；日志目录与其余入口共用
+ReadWritePaths=/var/log/wechat-bridge /var/lib/wechat-bridge-weixin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
