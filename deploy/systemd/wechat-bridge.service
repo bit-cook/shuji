@@ -1,0 +1,24 @@
+[Unit]
+Description=Shuji WeChat Command Bridge (wechat-bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wechat-bridge.env
+ExecStart=/usr/bin/node /opt/wechat-bridge/src/cli.js
+Restart=on-failure
+RestartSec=8
+# 最小权限（红线：禁止 root 常驻）
+User=wechat-bridge
+Group=wechat-bridge
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/wechat-bridge
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-sidecar"
+version = "0.1.0"
+description = "枢机 · Cardinal — Hermes 心跳 Sidecar：generic 协议上报 Mission-Control（仅标准库）"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[tool.setuptools]
+py-modules = ["sidecar"]

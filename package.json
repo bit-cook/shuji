@@ -1,0 +1,13 @@
+{
+  "name": "shuji",
+  "version": "0.1.0",
+  "private": true,
+  "description": "枢机 · Cardinal — Agent OS 控制面实现：命令路由、Hermes 心跳 Sidecar、部署清单",
+  "license": "MIT",
+  "scripts": {
+    "test:bridge": "node --test packages/wechat-bridge/test/*.test.js",
+    "test:sidecar": "python3 -m unittest discover -s packages/hermes-sidecar/tests",
+    "test:e2e": "node test/e2e.js",
+    "test": "npm run test:bridge && npm run test:sidecar && npm run test:e2e"
+  }
+}

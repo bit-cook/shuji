@@ -1,0 +1,23 @@
+[Unit]
+Description=Shuji Hermes Heartbeat Sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hermes-sidecar.env
+ExecStart=/usr/bin/python3 /opt/hermes-sidecar/sidecar.py
+Restart=on-failure
+RestartSec=10
+# 最小权限（红线：禁止 root 常驻）
+User=hermes-sidecar
+Group=hermes-sidecar
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

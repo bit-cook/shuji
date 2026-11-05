@@ -1,0 +1,24 @@
+services:
+  # 控制面（第三方，MIT）。只绑 Tailscale 网卡地址，不暴露公网。
+  mission-control:
+    image: ghcr.io/builderz-labs/mission-control:latest
+    env_file: .env
+    ports:
+      - "${MC_TAILSCALE_IP:-127.0.0.1}:3000:3000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # 命令路由（枢机自研，本站仓库构建）。企业微信选 wecom，测试/其他平台选 http。
+  wechat-bridge:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.bridge
+    env_file: ./env/wechat-bridge.env
+    environment:
+      MC_BASE: http://mission-control:3000
+    ports:
+      - "${BRIDGE_BIND:-127.0.0.1}:8080:8080"
+    depends_on:
+      - mission-control
+    restart: unless-stopped
