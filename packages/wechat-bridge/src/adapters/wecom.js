@@ -153,7 +153,7 @@ function createWecomAdapter({
   }
 
   /** 超大请求体：先写 413 再断链，客户端才读得到（直接 destroy 只会看到连接重置）。 */
-  function rejectTooLarge(req, res, send) {
+  function rejectTooLarge(req, res) {
     if (res.writableEnded) return;
     try {
       req.pause();
@@ -195,14 +195,26 @@ function createWecomAdapter({
     }
     if (req.method === 'POST') {
       // 声明式超限直接拒；分块上传在 data 里兜底
-      if (Number(req.headers['content-length'] || 0) > 1e6) { rejectTooLarge(req, res, send); return; }
-      let body = '';
+      if (Number(req.headers['content-length'] || 0) > 1e6) { rejectTooLarge(req, res); return; }
+      // 按 Buffer 收集，读完一次性解码。逐块 `body += c` 会把多字节 UTF-8 字符
+      // （中文 1 字 3 字节）在 TCP 分块边界上切成两半各自解码，各自变成 U+FFFD。
+      const chunks = [];
+      let received = 0;
+      let tooLarge = false;
       req.on('data', (c) => {
-        body += c;
-        if (body.length > 1e6) rejectTooLarge(req, res, send);
+        if (tooLarge) return;
+        received += c.length;
+        if (received > 1e6) {
+          tooLarge = true;
+          chunks.length = 0;
+          rejectTooLarge(req, res);
+          return;
+        }
+        chunks.push(c);
       });
       req.on('end', async () => {
-        if (res.writableEnded) return;
+        if (res.writableEnded || tooLarge) return;
+        const body = Buffer.concat(chunks).toString('utf8');
         try {
           const reply = await handleMessage(body, query);
           if (reply === null) { send(200, ''); return; } // 非文本：回复空串即可

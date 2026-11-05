@@ -1,6 +1,6 @@
 {
   "name": "@cardinal/mission-control",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "private": true,
   "description": "枢机 · Mission-Control — Agent 控制面：注册与心跳、任务下发/领取/回报、Token 成本计量、Bearer 鉴权、审计、只读网页面板",
   "license": "MIT",

@@ -124,7 +124,9 @@ function guardPublicBind(host, adapter, env = process.env) {
   // 长轮询出站（telegram / weixin），没有监听面可言
   if (adapter === 'telegram' || adapter === 'weixin') return;
   const h = String(host || '').toLowerCase();
-  const wildcard = h === '0.0.0.0' || h === '::' || h === '[::]' || h === '';
+  // 通配集合与控制面 isPublicHost 一致：::0 与 :: 同为 IPv6 未指定地址，
+  // Node 都会监听全部网卡，漏掉它等于红线留下一个缺口。
+  const wildcard = h === '0.0.0.0' || h === '::' || h === '::0' || h === '[::]' || h === '[::0]' || h === '*';
   if (!wildcard) return;
   if (String(env.ALLOW_PUBLIC_BIND || '') === '1') {
     process.stderr.write('[warn] 已按 ALLOW_PUBLIC_BIND=1 绑定通配地址——确认该网卡不是公网\n');

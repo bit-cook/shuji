@@ -393,7 +393,8 @@ describe('审计', () => {
     assert.ok(!joined.includes('SUPER_SECRET'), '审计不得记录请求体');
     assert.ok(!joined.includes(KEY), '审计不得记录令牌');
     assert.ok(lines.every((l) => typeof l.status === 'number'));
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    // 0600 只在 POSIX 文件系统上可验证（Windows/NTFS 读回 0666）
+    if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   });
 });
 

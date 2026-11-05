@@ -8,8 +8,14 @@
  *   - 启动时可先 getMe 校验令牌（validateToken），失败不崩、交给轮询重试
  *   - 单条 update 处理失败不影响同批其余消息（offset 已先行推进，不会重复消费）
  *   - 指数退避 1s→30s；stop() 可被信号处理器调用，做到优雅停机
+ *   - 每次调用带超时：连接被中间设备静默吞掉（黑洞）时，没有超时的 fetch 会
+ *     无限期挂起，长轮询循环从此再也不转——表现是机器人在线但谁都不理。
  */
 const MAX_BACKOFF_MS = 30000;
+/** 普通调用（getMe / sendMessage）的超时。 */
+const CALL_TIMEOUT_MS = 15000;
+/** 长轮询在服务端 hold 满 pollTimeout 秒，客户端超时要留出网络余量。 */
+const POLL_TIMEOUT_MARGIN_MS = 10000;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -32,30 +38,42 @@ function createTelegramAdapter({
   const doFetch = fetchImpl || globalThis.fetch;
   const log = logger.error ? logger : { debug() {}, info() {}, warn() {}, error() {} };
 
-  async function call(method, body, signal) {
-    const res = await doFetch(`${apiBase}/bot${encodeURIComponent(token)}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-      signal,
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      const err = new Error(`Telegram ${method} 失败: ${JSON.stringify(data)}`);
-      err.tgError = data;
-      // Telegram 的 429 带 parameters.retry_after（秒）。它比我们自己的指数退避
-      // 更权威——照它等，否则会在服务端还在限流期间反复撞墙。
-      const retryAfter = data && data.parameters && Number(data.parameters.retry_after);
-      if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = Math.ceil(retryAfter * 1000);
-      throw err;
+  async function call(method, body, { signal, timeoutMs = CALL_TIMEOUT_MS } = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // 外部信号（停机用）与超时合并：任一触发都中断这次请求。
+    // 定时器覆盖到响应体读完为止——AbortSignal 同样中断 res.json() 的读取。
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', () => controller.abort(), { once: true });
     }
-    return data.result;
+    try {
+      const res = await doFetch(`${apiBase}/bot${encodeURIComponent(token)}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+        signal: controller.signal,
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        const err = new Error(`Telegram ${method} 失败: ${JSON.stringify(data)}`);
+        err.tgError = data;
+        // Telegram 的 429 带 parameters.retry_after（秒）。它比我们自己的指数退避
+        // 更权威——照它等，否则会在服务端还在限流期间反复撞墙。
+        const retryAfter = data && data.parameters && Number(data.parameters.retry_after);
+        if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = Math.ceil(retryAfter * 1000);
+        throw err;
+      }
+      return data.result;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function getUpdates(offset, signal) {
     return call('getUpdates', {
       offset, timeout: pollTimeout, allowed_updates: ['message'],
-    }, signal);
+    }, { signal, timeoutMs: pollTimeout * 1000 + POLL_TIMEOUT_MARGIN_MS });
   }
 
   async function sendMessage(chatId, text) {

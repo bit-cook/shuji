@@ -35,7 +35,9 @@ describe('parseConfig 默认值', () => {
 
   test('相对路径按 cwd 解析', () => {
     const { config } = parseConfig({ ...GOOD, MC_DB: 'data/mc.db' }, { cwd: '/srv' });
-    assert.equal(config.dbPath, '/srv/data/mc.db');
+    // 期望值走同一个 path.resolve：语义是「相对 cwd 解析」，路径形态随平台
+    // （POSIX 上是 /srv/data/mc.db，Windows 上会补盘符）。
+    assert.equal(config.dbPath, path.resolve('/srv', 'data/mc.db'));
   });
 });
 

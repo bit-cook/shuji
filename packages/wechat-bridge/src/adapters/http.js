@@ -89,18 +89,28 @@ function createHttpAdapter({
         rejectTooLarge(req, res);
         return;
       }
-      let body = '';
+      // 按 Buffer 收集，读完一次性解码。逐块 `body += c` 会把每块各自 toString：
+      // 多字节 UTF-8 字符（中文 1 字 3 字节）恰好被 TCP 分块切开时，两半各自解码
+      // 都变成 U+FFFD。U+FFFD 出现在字符串值内部，JSON.parse 照样成功——命令
+      // 原文被静默换掉，坏在数据里，报错却一个都没有，更难察觉。字节上限口径在此统一。
+      const chunks = [];
+      let received = 0;
+      let tooLarge = false;
       req.on('data', (c) => {
-        // 按**字节**累计，不是字符串长度：中文 1 字 = 3 字节，用 body.length 的话
-        // 实际放进内存的会是声明上限的三倍（Content-Length 那道是按字节判的，
-        // 两边不同口径等于限幅没生效）。
-        body += c;
-        if (Buffer.byteLength(body) > maxBodyBytes) rejectTooLarge(req, res);
+        if (tooLarge) return;
+        received += c.length;
+        if (received > maxBodyBytes) {
+          tooLarge = true;
+          chunks.length = 0;
+          rejectTooLarge(req, res);
+          return;
+        }
+        chunks.push(c);
       });
       req.on('end', async () => {
-        if (res.writableEnded) return;
+        if (res.writableEnded || tooLarge) return;
         let msg;
-        try { msg = JSON.parse(body); }
+        try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
         catch { sendJson(res, 400, { error: 'invalid json' }); return; }
         try {
           const reply = await router.handle(

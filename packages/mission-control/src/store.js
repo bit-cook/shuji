@@ -159,21 +159,30 @@ function newTaskId(now, rand = crypto.randomBytes) {
  * maxDetailBytes：detail 的大小上限。心跳是周期性自动上报的，一个失灵的 Agent
  * （或恶意的）每周期塞进一大坨 JSON，就能把库撑爆——而控制面是要长期常驻的。
  * 超限时保留可读的摘要而不是整条拒绝：拒绝会让 Agent 直接掉线，更糟。
+ * status / model / framework 同理按长度截断（上限见 HEARTBEAT_FIELD_LIMITS）：
+ * detail 有 cap 而这几个字段没有的话，每周期一份的大字符串照样能撑爆库。
  */
+const HEARTBEAT_FIELD_LIMITS = { agentId: 200, status: 128, model: 128, framework: 64 };
+
+function capField(v, limit) {
+  const s = String(v ?? '').trim();
+  return s.length > limit ? s.slice(0, limit) : s;
+}
+
 function normalizeHeartbeat(body, maxDetailBytes = 8192) {
   if (!body || typeof body !== 'object') return null;
   const p = (body.payload && typeof body.payload === 'object') ? body.payload : body;
-  const agentId = String(p.agentId ?? p.agent_id ?? p.id ?? '').trim();
+  const agentId = capField(p.agentId ?? p.agent_id ?? p.id, HEARTBEAT_FIELD_LIMITS.agentId);
   if (!agentId) return null;
   const detail = (p.detail && typeof p.detail === 'object') ? p.detail : {};
   const usageSrc = (p.usage && typeof p.usage === 'object') ? p.usage
     : (detail.usage && typeof detail.usage === 'object') ? detail.usage : null;
   return {
     agentId,
-    status: String(p.status ?? 'unknown').trim() || 'unknown',
+    status: capField(p.status ?? 'unknown', HEARTBEAT_FIELD_LIMITS.status) || 'unknown',
     reportedAt: toMillis(p.reportedAt ?? p.reported_at ?? p.lastSeenAt, 0) || null,
-    framework: String(body.framework ?? p.framework ?? 'generic').trim() || 'generic',
-    model: String(p.model ?? detail.model ?? '').trim() || null,
+    framework: capField(body.framework ?? p.framework ?? 'generic', HEARTBEAT_FIELD_LIMITS.framework) || 'generic',
+    model: capField(p.model ?? detail.model ?? '', HEARTBEAT_FIELD_LIMITS.model) || null,
     detail: capDetail(detail, maxDetailBytes),
     usage: usageSrc ? {
       tokens: nonNegInt(usageSrc.tokens, 0),
@@ -520,5 +529,5 @@ function createStore({
 
 module.exports = {
   createStore, openDatabase, normalizeHeartbeat, capDetail, newTaskId,
-  sqliteAvailable, TASK_STATUS, OPEN_STATUS, SCHEMA,
+  sqliteAvailable, TASK_STATUS, OPEN_STATUS, SCHEMA, HEARTBEAT_FIELD_LIMITS,
 };

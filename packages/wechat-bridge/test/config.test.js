@@ -125,6 +125,11 @@ test('红线：拒绝绑定 0.0.0.0（除非显式 ALLOW_PUBLIC_BIND=1）', () =
     () => createBridgeFromEnv({ ...BASE, HOST: '0.0.0.0', PORT: '0', BRIDGE_TOKEN: 't' }),
     /不得暴露公网/,
   );
+  // ::0 与 :: 同为 IPv6 未指定地址（Node 会监听全部网卡），同样必须拦下
+  assert.throws(
+    () => createBridgeFromEnv({ ...BASE, HOST: '::0', PORT: '0', BRIDGE_TOKEN: 't' }),
+    /不得暴露公网/,
+  );
   // 显式 opted-in 后放行（此处用随机端口起真服务再关掉）
   const b = createBridgeFromEnv({ ...BASE, HOST: '0.0.0.0', PORT: '0', ALLOW_PUBLIC_BIND: '1' });
   assert.ok(b.server);

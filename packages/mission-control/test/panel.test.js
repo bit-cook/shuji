@@ -257,6 +257,17 @@ test('登录限流：连续错 5 次后第 6 次直接被挡（429），正确�
   });
 });
 
+test('面板请求体超限同样 413 + 断链提示（与 /api/* 同口径）', async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/panel/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: API_KEY, blob: 'x'.repeat(2 * 1024 * 1024) }),
+    });
+    assert.equal(res.status, 413);
+    assert.match(await res.text(), /payload too large/);
+  });
+});
+
 test('面板是只读的：面板路径下没有任何写端点', async () => {
   await withServer(async (base) => {
     const { cookie } = await login(base);

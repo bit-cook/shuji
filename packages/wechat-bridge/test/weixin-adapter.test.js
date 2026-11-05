@@ -162,8 +162,11 @@ test('状态文件：未登录时 start 不启动轮询', async () => {
 test('状态文件：令牌从磁盘恢复，且权限为 0600', async () => {
   const file = tmpStateFile('weixin-state.json');
   writeState(file, { token: 'tok-from-disk', baseUrl: 'https://ilinkai.weixin.qq.com', getUpdatesBuf: 'buf-7' });
-  const mode = fs.statSync(file).mode & 0o777;
-  assert.equal(mode, 0o600, '令牌文件必须 0600');
+  // 0600 只在 POSIX 文件系统上可验证（Windows/NTFS 读回 0666），见 audit-rotation.test.js
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(file).mode & 0o777;
+    assert.equal(mode, 0o600, '令牌文件必须 0600');
+  }
 
   const ilink = createMockIlink();
   const port = await ilink.listen();

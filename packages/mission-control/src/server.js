@@ -265,11 +265,17 @@ function createControlServer({
         }
         sendJson(res, out.status, out.body, out.headers);
       }).catch((e) => {
-        entry.status = 400;
+        // 与 /api/* 的 catch 同口径：超限 413 + 断链，坏 JSON 400，其余 400
+        const status = e && e.code === 'ETOOLARGE' ? 413 : 400;
+        entry.status = status;
         entry.error = String((e && e.message) || e);
-        counter.request(panelHit.route, 400);
+        counter.request(panelHit.route, status);
         recorder.record(entry);
-        sendJson(res, 400, { message: 'bad request' });
+        if (e && e.code === 'ETOOLARGE') {
+          rejectTooLarge(req, res);
+          return;
+        }
+        sendJson(res, status, { message: e && e.code === 'EBADJSON' ? 'invalid json' : 'bad request' });
       });
       return;
     }

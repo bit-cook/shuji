@@ -491,4 +491,28 @@ describe('心跳 detail 大小上限', () => {
     const d = { a: 'x'.repeat(1000) };
     assert.equal(capDetail(d, 0), d);
   });
+
+  test('status / model / framework / agentId 超长被截断（心跳字段不允许无上限撑爆库）', () => {
+    const { HEARTBEAT_FIELD_LIMITS } = require('../src/store');
+    const h = normalizeHeartbeat({
+      payload: {
+        agentId: 'a'.repeat(5000),
+        status: 's'.repeat(5000),
+        model: 'm'.repeat(5000),
+        framework: 'f'.repeat(5000),
+      },
+    });
+    assert.equal(h.agentId.length, HEARTBEAT_FIELD_LIMITS.agentId);
+    assert.equal(h.status.length, HEARTBEAT_FIELD_LIMITS.status);
+    assert.equal(h.model.length, HEARTBEAT_FIELD_LIMITS.model);
+    assert.equal(h.framework.length, HEARTBEAT_FIELD_LIMITS.framework);
+  });
+
+  test('截断只影响存储形状，Agent 照常注册与读取', () => {
+    const s = freshStore({ now: () => 1700000000000 });
+    const r = s.applyHeartbeat({ payload: { agentId: 'a', status: 'x'.repeat(9000) } });
+    assert.equal(r.ok, true);
+    const a = s.getAgent('a');
+    assert.ok(a.status.length <= 128, `status 应被截断，实际 ${a.status.length}`);
+  });
 });

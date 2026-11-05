@@ -2,6 +2,47 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号语义化。
 
+## [0.6.4] - 2026-11-06
+
+主题：**健壮性收尾——四个真缺陷、一处红线缺口、一处行为不一致，外加 Windows 开发机全量测试全绿。**
+缺陷全部来自对请求体处理与长轮询路径的逐行审查。
+
+全量回归：324 项单测（136 桥 + 141 控制面 + 25 Sidecar + 22 插件）+ T1–T26 端到端，
+Windows 开发机与 CI（ubuntu）都全绿。
+
+### 修复
+
+- **HTTP 与企业微信适配器按 TCP 分段逐块解码请求体**（`adapters/http.js`、`adapters/wecom.js`）：
+  `body += chunk` 会把每个分段各自 `toString('utf8')`。多字节字符（中文 1 字 3 字节）恰好被
+  分段切开时，两半各自变成 U+FFFD；它出现在 JSON 字符串值内部，`JSON.parse` 照样成功、
+  客户端照样拿到 200——命令原文被静默换掉，坏在数据里，报错却一个都没有。
+  改为按 Buffer 收集、读完一次性解码；413 之后多余的请求体字节不再继续累积
+- **Telegram 适配器的所有请求都没有超时**（`adapters/telegram.js`）：连接被中间设备静默
+  吞掉（黑洞）时，fetch 会无限期挂起，长轮询循环从此再也不转——机器人在线但谁都不理。
+  现在普通调用 15 秒、长轮询 `pollTimeout + 10 秒` 超时，超时后走既有的退避重试；
+  停机信号与超时合并在同一个 AbortController 上
+- **心跳的 `status` / `model` / `framework` / `agentId` 没有长度上限**（mission-control
+  `store.js`）：detail 有 8KB 上限，这几个字段却无上限——失灵的 Agent 每周期塞进的大
+  字符串照样能撑爆库（与 detail 上限同一个威胁模型）。截断上限：agentId 200、
+  status 128、model 128、framework 64
+- **面板路径的请求体超限回 400，`/api/*` 回 413**（mission-control `server.js`）：同一台
+  服务两套标准。面板分支统一为先回 413 再断链，带 `payload too large` 说明
+
+### 安全
+
+- **bridge 的通配地址红线漏掉 `::0`**（`index.js`）：`::0` 与 `::` 同为 IPv6 未指定地址，
+  Node 会监听全部网卡；`guardPublicBind` 的名单里没有它，`HOST=::0` 就能绕过
+  `ALLOW_PUBLIC_BIND=1` 把 HTTP 入口暴露出去。名单补全为与控制面 `isPublicHost` 一致
+  （含 `[::0]` 与 `*`），并补红线测试
+
+### 测试
+
+- **Windows 开发机全绿**：0600 权限断言（6 处）与 POSIX 路径断言（1 处）此前在 Windows
+  上必然失败——NTFS 不表示 POSIX 权限位、`path.resolve` 会补盘符。权限位只在 POSIX
+  目标上校验；路径解析按 `path.resolve` 语义断言。CI 的 ubuntu 不受影响，POSIX 断言照常执行
+- 跨块解码、Telegram 超时、`::0` 红线、心跳限长、面板 413 各有新测试钉住；
+  跨块解码测试已验证能抓到旧缺陷（把修复临时回退一次，测试立刻变红）
+
 ## [0.6.3] - 2026-11-05
 
 主题：**面板在未登录时永远停在「正在载入…」**。这个回归是 v0.6.1 改 `render()` 时引入的，

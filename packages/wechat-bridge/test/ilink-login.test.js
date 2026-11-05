@@ -37,7 +37,8 @@ test('登录：confirmed 后令牌落盘（0600）并返回扫码账号 ID', asy
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(onDisk.token, 'tok-xyz');
     assert.equal(onDisk.botId, 'bot-123');
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    // 0600 只在 POSIX 文件系统上可验证（Windows/NTFS 读回 0666），见 audit-rotation.test.js
+    if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     // 二维码请求与状态轮询都真的打到了桩上
     assert.ok(ilink.state.calls.some((c) => c.method.endsWith('/get_bot_qrcode')));
     assert.ok(ilink.state.calls.some((c) => c.method.endsWith('/get_qrcode_status')));

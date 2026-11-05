@@ -200,3 +200,37 @@ test('handleUpdate：chat 缺 type 时按私聊处理（向后兼容旧报文）
   assert.equal(r.from, '111');
   await tg.close();
 });
+
+test('call：请求挂起时按超时中断（连接黑洞不再卡死长轮询）', async () => {
+  // fetch 永不返回、只响应 abort：模拟连接被中间设备静默吞掉。
+  // 没有超时的 call 会无限期挂起，轮询循环从此再也不转。
+  let sawSignal = null;
+  const hungFetch = (url, init = {}) => new Promise((_, reject) => {
+    sawSignal = init.signal;
+    if (init.signal.aborted) return abortErr();
+    init.signal.addEventListener('abort', abortErr, { once: true });
+    function abortErr() {
+      const e = new Error('This operation was aborted');
+      e.name = 'AbortError';
+      reject(e);
+    }
+  });
+  const adapter = createTelegramAdapter({ router: makeRouter(), token: 'T', fetchImpl: hungFetch });
+  const t0 = Date.now();
+  await assert.rejects(() => adapter.call('getMe', {}, { timeoutMs: 60 }));
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 5000, `应在超时后返回，实际 ${elapsed}ms`);
+  assert.equal(sawSignal && sawSignal.aborted, true, 'abort 信号已触发');
+  // 显式传 signal（stop() 用）与超时并存：外部信号先触发也能中断
+  const ac = new AbortController();
+  const slowFetch = (url, init = {}) => new Promise((_, reject) => {
+    init.signal.addEventListener('abort', () => {
+      const e = new Error('This operation was aborted');
+      e.name = 'AbortError';
+      reject(e);
+    }, { once: true });
+  });
+  const adapter2 = createTelegramAdapter({ router: makeRouter(), token: 'T', fetchImpl: slowFetch });
+  setTimeout(() => ac.abort(), 20);
+  await assert.rejects(() => adapter2.call('getUpdates', {}, { signal: ac.signal, timeoutMs: 60000 }));
+});
