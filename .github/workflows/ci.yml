@@ -131,7 +131,7 @@ jobs:
           fi
 
   e2e:
-    name: 端到端验收 T1-T22
+    name: 端到端验收 T1-T26
     runs-on: ubuntu-latest
     needs: [bridge, sidecar, plugin, mission-control]
     steps:
