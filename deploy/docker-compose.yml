@@ -9,7 +9,8 @@ services:
       - ./data:/data
     restart: unless-stopped
 
-  # 命令路由（枢机自研，本站仓库构建）。企业微信选 wecom，测试/其他平台选 http。
+  # 命令路由 · OpenClaw 插件入口（枢机自研）。OpenClaw 主机上的
+  # cardinal-bridge 插件把微信消息 POST 到本服务的 /openclaw。
   wechat-bridge:
     build:
       context: ../..
@@ -17,8 +18,24 @@ services:
     env_file: ./env/wechat-bridge.env
     environment:
       MC_BASE: http://mission-control:3000
+      ADAPTER: http
     ports:
       - "${BRIDGE_BIND:-127.0.0.1}:8080:8080"
+    depends_on:
+      - mission-control
+    restart: unless-stopped
+
+  # 命令路由 · Telegram 入口（长轮询，无需公网地址）。
+  # 与上面共用 env 文件，仅切换 ADAPTER 并注入机器人令牌。
+  wechat-bridge-telegram:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.bridge
+    env_file: ./env/wechat-bridge.env
+    environment:
+      MC_BASE: http://mission-control:3000
+      ADAPTER: telegram
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?需要在 .env 里配置 TELEGRAM_BOT_TOKEN}
     depends_on:
       - mission-control
     restart: unless-stopped

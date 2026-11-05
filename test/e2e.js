@@ -14,6 +14,7 @@ const { promisify } = require('node:util');
 const pexec = promisify(execFile);
 
 const { createMockMissionControl } = require('./mock-mission-control');
+const { createMockTelegram } = require('./mock-telegram');
 const { createBridgeFromEnv, listen } = require('../packages/wechat-bridge/src/index');
 const { createHttpAdapter } = require('../packages/wechat-bridge/src/adapters/http');
 const { createRouter } = require('../packages/wechat-bridge/src/core');
@@ -142,9 +143,37 @@ async function main() {
     await new Promise((r) => server2.once('listening', r));
     const list2 = await postJson(`http://127.0.0.1:${server2.address().port}/message`, { from: ALLOW, text: '/list' });
     report('T8', '韧性：bridge 重启后 /list 数据仍在', /hermes-node-b \[online\]/.test(list2), list2.split('\n')[0]);
-    await new Promise((r) => server2.close(r));
+    await new Promise((r) => { server2.closeAllConnections(); server2.close(r); });
+
+    // T9 Telegram 入口：长轮询适配器全链路（mock Bot API）
+    const tg = createMockTelegram();
+    const tgPort = await tg.listen();
+    const tgEnv = {
+      ...process.env,
+      MC_BASE, MC_API_KEY: 'e2e-key',
+      WECHAT_ALLOW_FROM: '', TELEGRAM_ALLOW_FROM: 'tg-me',
+      ADAPTER: 'telegram', TELEGRAM_BOT_TOKEN: 'e2e-token',
+      TELEGRAM_API_BASE: `http://127.0.0.1:${tgPort}`,
+      TELEGRAM_DRAIN_BACKLOG: '0',
+    };
+    const tgBridge = createBridgeFromEnv(tgEnv);
+    try {
+      tg.push({ message: { message_id: 1, from: { id: 'tg-me' }, chat: { id: 42 }, text: '/ping' } });
+      tg.push({ message: { message_id: 2, from: { id: 'stranger' }, chat: { id: 43 }, text: '/list' } });
+      const tgDeadline = Date.now() + 5000;
+      while (tg.state.sent.length < 2 && Date.now() < tgDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const pongOk = tg.state.sent[0] && tg.state.sent[0].chat_id === 42 && /^pong/.test(tg.state.sent[0].text);
+      const denyOk = tg.state.sent[1] && tg.state.sent[1].chat_id === 43 && /拒绝访问/.test(tg.state.sent[1].text);
+      report('T9', 'Telegram：/ping 通、陌生人拒（长轮询适配器）', !!(pongOk && denyOk),
+        `sent=${tg.state.sent.length} first=${(tg.state.sent[0] && tg.state.sent[0].text || '').slice(0, 30)}`);
+    } finally {
+      tgBridge.polling.stop();
+    }
+    await tg.close();
   } finally {
-    await new Promise((r) => mcServer.close(r));
+    await new Promise((r) => { mcServer.closeAllConnections(); mcServer.close(r); });
   }
 
   console.log(`\n结果：${passed} 通过 / ${failed} 失败（共 ${passed + failed} 项）`);

@@ -1,0 +1,31 @@
+{
+  "id": "cardinal-bridge",
+  "name": "Cardinal Bridge",
+  "description": "把 /ping /list 等 Cardinal 命令从聊天通道转给枢机控制面，不调模型；非命令消息照常走 AI",
+  "categories": ["other"],
+  "contracts": {
+    "hooks": ["before_agent_reply"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "cardinalBase": {
+        "type": "string",
+        "description": "枢机命令路由地址，如 http://127.0.0.1:8080"
+      },
+      "cardinalToken": {
+        "type": "string",
+        "description": "可选：调用枢机 /openclaw 端点时的 Bearer 令牌"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "调用枢机的超时毫秒数，默认 10000"
+      }
+    },
+    "required": ["cardinalBase"]
+  }
+}

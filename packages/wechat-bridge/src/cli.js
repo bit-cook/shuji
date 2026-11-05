@@ -26,13 +26,20 @@ if (args.port) process.env.PORT = args.port;
 if (args.host) process.env.HOST = args.host;
 
 try {
-  const { server } = createBridgeFromEnv(process.env);
-  server.on('listening', () => {
-    const addr = server.address();
+  const bridge = createBridgeFromEnv(process.env);
+  const adapter = (process.env.ADAPTER || 'http').toLowerCase();
+  if (bridge.server) {
+    bridge.server.on('listening', () => {
+      const addr = bridge.server.address();
+      process.stdout.write(
+        `wechat-bridge 已启动 adapter=${adapter} ` +
+        `listen=${addr.address}:${addr.port} 白名单=${process.env.WECHAT_ALLOW_FROM || process.env.TELEGRAM_ALLOW_FROM}\n`);
+    });
+  } else {
     process.stdout.write(
-      `wechat-bridge 已启动 adapter=${process.env.ADAPTER || 'http'} ` +
-      `listen=${addr.address}:${addr.port} 白名单=${process.env.WECHAT_ALLOW_FROM}\n`);
-  });
+      `wechat-bridge 已启动 adapter=${adapter}（long polling，无监听端口）` +
+      ` 白名单=${process.env.WECHAT_ALLOW_FROM || process.env.TELEGRAM_ALLOW_FROM}\n`);
+  }
 } catch (e) {
   process.stderr.write('启动失败：' + e.message + '\n');
   process.exit(1);

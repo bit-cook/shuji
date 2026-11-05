@@ -80,9 +80,10 @@ function createRouter({
     }
   }
 
-  async function handle(text, fromUser) {
+  async function handle(text, fromUser, meta = {}) {
     const cmdText = String(text == null ? '' : text).trim().slice(0, 500);
     const entry = { from: fromUser, cmd: cmdText };
+    if (meta.channel) entry.channel = meta.channel;
 
     if (!allow.has(fromUser)) {
       entry.result = 'denied';

@@ -6,7 +6,8 @@
  */
 const http = require('node:http');
 
-function createHttpAdapter({ router, path = '/message' }) {
+function createHttpAdapter({ router, paths = ['/message', '/openclaw'] }) {
+  const pathSet = new Set(paths);
   function handler(req, res) {
     const url = new URL(req.url, 'http://x');
     if (req.method === 'GET' && url.pathname === '/healthz') {
@@ -14,7 +15,7 @@ function createHttpAdapter({ router, path = '/message' }) {
       res.end('ok');
       return;
     }
-    if (req.method === 'POST' && url.pathname === path) {
+    if (req.method === 'POST' && pathSet.has(url.pathname)) {
       let body = '';
       req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
       req.on('end', async () => {

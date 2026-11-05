@@ -1,0 +1,27 @@
+{
+  "name": "@cardinal/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "枢机 · Cardinal — OpenClaw 插件：把微信（ClawBot/iLink）等通道里的 Cardinal 命令确定性地转给枢机控制面，不调模型",
+  "license": "MIT",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.24-beta.2"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "openclaw": "^2026.10.10",
+    "typescript": "^7.0.2"
+  }
+}

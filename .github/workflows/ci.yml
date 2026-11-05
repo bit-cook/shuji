@@ -26,10 +26,25 @@ jobs:
           python-version: '3.12'
       - run: python3 -m unittest discover -s packages/hermes-sidecar/tests -v
 
-  e2e:
-    name: 端到端验收 T1-T8
+  plugin:
+    name: openclaw-plugin (tsc + node:test)
     runs-on: ubuntu-latest
-    needs: [bridge, sidecar]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+        working-directory: packages/openclaw-cardinal-plugin
+      - run: npx tsc --noEmit
+        working-directory: packages/openclaw-cardinal-plugin
+      - run: node --test test/*.test.ts
+        working-directory: packages/openclaw-cardinal-plugin
+
+  e2e:
+    name: 端到端验收 T1-T9
+    runs-on: ubuntu-latest
+    needs: [bridge, sidecar, plugin]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
