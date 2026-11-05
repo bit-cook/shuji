@@ -19,6 +19,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>枢机 · 控制面板</title>
+<link rel="icon" href="data:,"><!-- 内联空图标：否则浏览器每次都要 /favicon.ico，在审计里留一串 404 -->
 <style>
   :root { color-scheme: light; }
   .viz-root {
@@ -252,7 +253,12 @@ const PAGE_HTML = `<!DOCTYPE html>
         if (!r.ok) throw new Error('会话检查失败（HTTP ' + r.status + '）');
         return r.json();
       })
-      .then(function (s) { if (s && s.authenticated) load(); })
+      .then(function (s) {
+        // 未登录时服务端返回的是 200 + {"authenticated":false}，不是 401。
+        // 少了这个分支，页面既不进登录表单也不报错，就永远停在「正在载入…」。
+        if (s && s.authenticated) load();
+        else loginForm(null);
+      })
       .catch(function (e) { loginForm(e.message); });
   }
 
