@@ -174,4 +174,27 @@ describe('面板脚本按服务端响应决定页面去向', () => {
     bail.fn();
     assert.match(p.el('app').innerHTML, /API Key/, '已进入登录表单，自愈不得覆盖它');
   });
+
+  test('状态展示：上报 offline 的 Agent 与纠偏一样显示「离线」', async () => {
+    const p = runPage({
+      '/panel/api/session': res(200, { authenticated: true }),
+      '/panel/api/snapshot': res(200, {
+        ...SNAPSHOT,
+        totals: { ...SNAPSHOT.totals, agents: 2, online: 1 },
+        agents: [
+          { agentId: 'alive', status: 'online', stale: false, model: null, framework: null,
+            source: null, lastSeenAt: 1700000000000, tasks: 0, tokens: 0 },
+          { agentId: 'stopped', status: 'offline', stale: false, model: null, framework: null,
+            source: null, lastSeenAt: 1700000000000, tasks: 0, tokens: 0 },
+        ],
+      }),
+    });
+    await flush();
+    await flush();
+    const html = p.el('app').innerHTML;
+    assert.match(html, /在线/, 'online 的 Agent 显示在线');
+    assert.equal((html.match(/离线/g) || []).length >= 2, true,
+      '主动上报的 offline 应与纠偏一样按「离线」呈现（含 KPI 提示行）');
+    assert.doesNotMatch(html, />offline</, '原文 offline 不得直接出现在状态格里');
+  });
 });

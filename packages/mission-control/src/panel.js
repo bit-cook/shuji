@@ -157,7 +157,9 @@ function createPanel({
         staleSec: (config && config.staleSec) || 0,
         totals: {
           agents: costs.agentCount,
-          online: agents.filter((a) => !a.stale).length,
+          // 在线的判定与表格一致：纠偏后仍自称 online 才算。只看 !stale 的话，
+          // 主动上报 offline 的 Agent 会被数进「在线」，KPI 与明细表互相矛盾
+          online: agents.filter((a) => !a.stale && a.status === 'online').length,
           tokens: costs.totalTokens,
           costUsd: costs.totalCostUsd,
           tasks: costs.taskCount,

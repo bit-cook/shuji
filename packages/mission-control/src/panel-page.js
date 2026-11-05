@@ -186,7 +186,9 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   function statusCell(stale, status) {
     var s = String(status || 'unknown');
-    if (stale) return '<span class="status offline"><span class="dot"></span>离线</span>';
+    // 主动上报的 offline 与心跳超时纠偏一样按离线呈现（红点 + 中文文案），
+    // 否则表格里会出现黄点配原文 offline，与顶部「离线 N」计数对不上
+    if (stale || s === 'offline') return '<span class="status offline"><span class="dot"></span>离线</span>';
     if (s === 'online') return '<span class="status online"><span class="dot"></span>在线</span>';
     return '<span class="status unknown"><span class="dot"></span>' + esc(s) + '</span>';
   }

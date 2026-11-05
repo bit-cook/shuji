@@ -7,7 +7,7 @@
 主题：**健壮性收尾——四个真缺陷、一处红线缺口、一处行为不一致，外加 Windows 开发机全量测试全绿。**
 缺陷全部来自对请求体处理与长轮询路径的逐行审查。
 
-全量回归：324 项单测（136 桥 + 141 控制面 + 25 Sidecar + 22 插件）+ T1–T26 端到端，
+全量回归：326 项单测（136 桥 + 143 控制面 + 25 Sidecar + 22 插件）+ T1–T26 端到端，
 Windows 开发机与 CI（ubuntu）都全绿。
 
 ### 修复
@@ -27,6 +27,10 @@ Windows 开发机与 CI（ubuntu）都全绿。
   status 128、model 128、framework 64
 - **面板路径的请求体超限回 400，`/api/*` 回 413**（mission-control `server.js`）：同一台
   服务两套标准。面板分支统一为先回 413 再断链，带 `payload too large` 说明
+- **面板 KPI 把主动上报 offline 的 Agent 数进「在线」**（mission-control `panel.js`）：
+  在线计数只看纠偏标记，Agent 自己报 offline 时 `stale` 为 false，于是明细表显示离线、
+  顶部却写着「在线 N · 离线 0」，两处互相矛盾。在线判定改为与明细表一致
+  （纠偏后仍自称 online 才算）；状态格里原文 offline 也统一按「离线」红点呈现
 
 ### 安全
 

@@ -196,6 +196,20 @@ test('快照：登录后拿得到汇总与 Agent 明细', async () => {
   });
 });
 
+test('快照：主动上报 offline 的 Agent 不计入「在线」', async () => {
+  await withServer(async (base, store) => {
+    store.applyHeartbeat({ agentId: 'alive', status: 'online' });
+    store.applyHeartbeat({ agentId: 'stopped', status: 'offline' });
+    const { cookie } = await login(base);
+    const res = await fetch(`${base}/panel/api/snapshot`, { headers: { cookie: `${COOKIE_NAME}=${cookie}` } });
+    const body = await res.json();
+    assert.equal(body.totals.agents, 2);
+    assert.equal(body.totals.online, 1, 'offline 的 Agent 不得被数进在线');
+    const stopped = body.agents.find((a) => a.agentId === 'stopped');
+    assert.equal(stopped.stale, false, '它是自己报的 offline，纠偏标记不适用');
+  });
+});
+
 test('快照：会话被篡改（换会话号 / 改过期时间）一律 401', async () => {
   await withServer(async (base) => {
     const { cookie } = await login(base);
