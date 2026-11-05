@@ -141,6 +141,19 @@ test('登录失败按状态码给出准确原因，不把一切都说成密钥�
   });
 });
 
+test('面板页面：禁用 JavaScript 时有明确提示，且载入卡住有出口', async () => {
+  // 页面初始内容是「正在载入…」，整个面板由 JS 渲染。render() 因任何原因没跑完
+  // （脚本被拦截、请求挂起、端口转发没建立），用户会被永久留在这句话上，
+  // 既不知道该重试还是该换浏览器——这是比报错更糟的一种失败。
+  await withServer(async (base) => {
+    const html = await (await fetch(`${base}/panel`)).text();
+    assert.match(html, /<noscript>[\s\S]*JavaScript[\s\S]*<\/noscript>/,
+      '禁用 JS 时必须说明原因，而不是留一句「正在载入…」');
+    assert.match(html, /id="retry"/, '载入超时后要给出重试按钮');
+    assert.match(html, /aria-busy="true"/, '初始仍标记为载入中，自愈定时器据此判断');
+  });
+});
+
 test('登录：正确的 API Key 换到 HttpOnly + SameSite=Strict 的会话 Cookie', async () => {
   await withServer(async (base) => {
     const { res, cookie } = await login(base);

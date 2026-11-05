@@ -127,6 +127,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 <body>
 <div class="viz-root">
   <div class="wrap" id="app" aria-busy="true"><p class="empty">正在载入…</p></div>
+  <noscript><p class="empty">面板需要浏览器执行 JavaScript。启用后刷新本页。</p></noscript>
 </div>
 <div class="tip" id="tip" role="status" aria-live="off"></div>
 <script>
@@ -136,6 +137,23 @@ const PAGE_HTML = `<!DOCTYPE html>
   var tip = document.getElementById('tip');
   var REFRESH_MS = 10000;
   var timer = null;
+  var BAIL_MS = 8000;
+
+  // 载入自愈：render() 因任何原因没跑完（脚本被拦截、请求挂起、浏览器插件、
+  // 端口转发的连接没建立），页面会永远停在初始的「正在载入…」上，用户看不出
+  // 该重试还是该换浏览器。这里给一个可观测的出口。
+  var bail = setTimeout(function () {
+    var box = document.getElementById('app');
+    if (!box || box.getAttribute('aria-busy') !== 'true') return;
+    box.setAttribute('aria-busy', 'false');
+    box.innerHTML = '<div class="login"><h1>枢机 · 控制面板</h1>'
+      + '<p>面板载入超过预期时间。请确认这个浏览器允许执行 JavaScript，'
+      + '再点重试；仍不行就按 F12 看 Console 里的报错。</p>'
+      + '<div class="row"><button class="primary" id="retry">重试</button></div></div>';
+    document.getElementById('retry').addEventListener('click', function () {
+      location.reload();
+    });
+  }, BAIL_MS);
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -227,6 +245,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   function render() {
     // 面板端点一律用绝对路径：相对路径在 /panel/ （带尾斜杠）下会拼成
     // /panel/panel/... 全部 404，而 404 又会被误显示成「API Key 不正确」。
+    clearTimeout(bail);
     fetch('/panel/api/session', { credentials: 'same-origin' })
       .then(function (r) {
         if (r.status === 401) { loginForm(null); return null; }
@@ -239,6 +258,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   function loginForm(err) {
     if (timer) { clearInterval(timer); timer = null; }
+    clearTimeout(bail);
     document.getElementById('app').setAttribute('aria-busy', 'false');
     app.innerHTML = '<div class="login"><h1>枢机 · 控制面板</h1>'
       + '<p>输入控制面 API Key 进入。会话有效期 12 小时， Cookie 仅存在这个浏览器里。</p>'
@@ -282,6 +302,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   function paint(d) {
+    clearTimeout(bail);
     app.setAttribute('aria-busy', 'false');
     var t = d.totals;
     var rows = Object.keys(d.byAgent).map(function (id) {

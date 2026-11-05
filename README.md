@@ -82,7 +82,7 @@
 ## 快速开始（本地 3 分钟跑通验收）
 
 ```bash
-# 0. 单测：bridge 133 项 + 控制面 125 项 + sidecar 25 项 + 插件 22 项
+# 0. 单测：bridge 133 项 + 控制面 126 项 + sidecar 25 项 + 插件 22 项
 npm test
 
 # 1. 端到端验收 T1–T26（mock 控制面 + mock Hermes + mock Telegram + mock iLink
@@ -176,7 +176,7 @@ systemctl --user enable --now cardinal-mission-control \
 ## 测试现状（每次提交由 CI 复跑）
 
 - `wechat-bridge`：133 项 `node:test`（白名单 / 二次确认 / 审计与轮转 / 限流 / HTTP 鉴权与韧性 / 企业微信回调加解密往返 / Telegram 长轮询 / 配置与公网绑定红线 / MC 客户端重试 / **启动即校验、单入口白名单漏配、请求体按字节判限、Telegram 群聊忽略、审计文件重建后仍 0600、iLink 协议保精度解析与无损 ID、微信登录状态机全分支、微信长轮询与游标回传**）
-- `mission-control`：125 项 `node:test`（报文归一化含秒/毫厘单位 / 心跳超时纠偏 / 任务状态机与重复领取 / 每 Agent 任务与心跳流水裁剪 / detail 大小上限 / 成本合并 / 持久化 / 路由匹配 / Bearer / 413·429·裸 TCP 韧性 / 审计不含密钥 / 限流器与计数器的有界性 / **网页面板：会话签发与校验、Cookie 防篡改、过期即失效、登录限流、只读边界、MC_PANEL=0 整体关闭、**面板端点一律绝对路径（`/panel/` 带尾斜杠时不会拼成 `/panel/panel/…`）、登录失败按状态码给出准确原因**）
+- `mission-control`：126 项 `node:test`（报文归一化含秒/毫厘单位 / 心跳超时纠偏 / 任务状态机与重复领取 / 每 Agent 任务与心跳流水裁剪 / detail 大小上限 / 成本合并 / 持久化 / 路由匹配 / Bearer / 413·429·裸 TCP 韧性 / 审计不含密钥 / 限流器与计数器的有界性 / **网页面板：会话签发与校验、Cookie 防篡改、过期即失效、登录限流、只读边界、MC_PANEL=0 整体关闭、**面板端点一律绝对路径（`/panel/` 带尾斜杠时不会拼成 `/panel/panel/…`）、登录失败按状态码给出准确原因、载入卡死时的自愈提示与 noscript**）
 - `hermes-sidecar`：25 项 `unittest`（心跳报文与鉴权头、401 快速失败、500 重试、systemd 退化**含用户级单元自动识别**、CLI 退出码、dry-run、退避抖动）
 - `openclaw-cardinal-plugin`：22 项 `node:test` + 对真实 openclaw SDK 的 `tsc --noEmit` 零错误
 - `e2e`：T1–T26 全过（链路 / 安全 / 端点鉴权 / 令牌一次性 / 状态 / 告警 / 恢复 / 计量 / 调度 / 韧性 / Telegram / 微信 iLink / 审计留痕 / 企微备份链路 / **真控制面：鉴权、心跳落库、dispatch 与未注册 Agent、超时纠偏、claim-complete 计量、重启后持久化、网页面板会话与只读边界**）
