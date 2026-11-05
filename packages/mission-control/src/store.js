@@ -135,6 +135,16 @@ function toMillis(v, fallback = 0) {
   return n < 1e11 ? Math.floor(n * 1000) : Math.floor(n);
 }
 
+/**
+ * 心跳 usage 的语义是**增量**（自上次心跳以来新增的 tokens / costUsd），
+ * 控制面把它累加进 Agent 的累计值。
+ *
+ * 这不是唯一合理的读法，所以在这里写清楚：如果一个 Agent 改成上报
+ * 「到目前为止的总量」（累计值），成本会被反复累加而无限膨胀，且看不出异常。
+ * 要报累计量的 Agent 请自行做差，或先扩展协议（例如加一个 usageMode 字段）。
+ */
+const USAGE_SEMANTICS = 'delta';
+
 function newTaskId(now, rand = crypto.randomBytes) {
   // 随机部分用 crypto 而不是 Math.random：任务 ID 是 claim/complete 的「口令」，
   // Math.random 的种子可预测，等于把任务领取权交给能观察 ID 序列的人。

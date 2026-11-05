@@ -171,3 +171,20 @@ test('通道标识进入审计（telegram / openclaw / http）', async () => {
   await router.handle('/ping', 'me');
   assert.deepEqual(auditLog.map((e) => e.channel), ['telegram', 'openclaw', undefined]);
 });
+
+test('未实现的危险命令不弹确认令牌（/restart、/delete 尚未实现）', async () => {
+  // 先看到「⚠ 危险操作待确认」、确认完才被告知「未知命令」是白绕一圈，
+  // 还会让人以为 dispatch 那套确认机制坏了。
+  const { router, auditLog } = makeRouter();
+  const reply = await router.handle('/restart node-a', 'me');
+  assert.match(reply, /未知命令/);
+  assert.equal(auditLog.length, 1);
+  assert.equal(auditLog[0].result, 'ok');
+});
+
+test('实现了的危险命令照旧弹令牌（/dispatch）', async () => {
+  const { router } = makeRouter();
+  const reply = await router.handle('/dispatch node-a 巡检', 'me');
+  assert.match(reply, /危险操作待确认/);
+  assert.match(reply, /\/confirm [0-9A-F]{8,}/);
+});

@@ -43,6 +43,10 @@ function createTelegramAdapter({
     if (!data.ok) {
       const err = new Error(`Telegram ${method} 失败: ${JSON.stringify(data)}`);
       err.tgError = data;
+      // Telegram 的 429 带 parameters.retry_after（秒）。它比我们自己的指数退避
+      // 更权威——照它等，否则会在服务端还在限流期间反复撞墙。
+      const retryAfter = data && data.parameters && Number(data.parameters.retry_after);
+      if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = Math.ceil(retryAfter * 1000);
       throw err;
     }
     return data.result;
@@ -120,8 +124,13 @@ function createTelegramAdapter({
         } catch (e) {
           if (stopped) break;
           onError ? onError(e) : log.warn('telegram poll 失败：' + e.message);
-          await sleepImpl(backoff);
-          backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+          // 服务端明确要求等多久就等多久（429 的 retry_after），否则用自己的退避
+          const wait = e && Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0
+            ? e.retryAfterMs
+            : backoff;
+          await sleepImpl(wait);
+          if (wait >= backoff) backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+          else backoff = 1000; // 按服务端指示等过一次，退回初始值
         }
       }
       log.info('telegram: 长轮询已停止');

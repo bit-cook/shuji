@@ -8,6 +8,13 @@ const { createRateLimiter } = require('./ratelimit');
 const { createStats } = require('./stats');
 const { createNoopLogger } = require('./log');
 
+// 实际能执行的命令。/restart、/delete 在危险命令名单里但尚未实现——
+// 不 Implemented 就弹确认令牌的话，用户会先看到「⚠ 危险操作待确认」，
+// 确认完才被告知「未知命令」，白绕一圈。
+const IMPLEMENTED = new Set([
+  '/ping', '/help', '/list', '/status', '/tasks', '/cost', '/dispatch', '/confirm',
+]);
+
 const USAGE = [
   '支持命令：',
   '/ping — 链路自检',
@@ -205,8 +212,8 @@ function createRouter({
         return reply;
       }
 
-      // 危险命令：先发令牌，二次确认后才执行
-      if (DANGEROUS_COMMANDS.has(cmd)) {
+      // 危险命令：先发令牌，二次确认后才执行（只对真正实现了的命令生效）
+      if (DANGEROUS_COMMANDS.has(cmd) && IMPLEMENTED.has(cmd)) {
         const token = confirm.create({ fromUser: user, text: cmdText });
         entry.result = 'confirm_required';
         recorder.record(entry);
@@ -235,4 +242,4 @@ function createRouter({
   return { handle, confirm, USAGE, stats: counter };
 }
 
-module.exports = { createRouter, USAGE, DANGEROUS_COMMANDS, normalize, clip, toArray };
+module.exports = { createRouter, USAGE, IMPLEMENTED, DANGEROUS_COMMANDS, normalize, clip, toArray };
