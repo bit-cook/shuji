@@ -77,7 +77,7 @@ test('HTTP 适配器：dispatch 二次确认全流程', async () => {
   })).json()).reply;
 
   const pending = await post('/dispatch node-a 夜间巡检');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   assert.ok(token);
   const done = await post(`/confirm ${token}`);
   assert.match(done, /已下发/);

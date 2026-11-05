@@ -63,6 +63,13 @@ function createTelegramAdapter({
   async function handleUpdate(update) {
     const msg = update.message;
     if (!msg || typeof msg.text !== 'string') return null; // 非文本忽略
+    // 只接私聊。机器人一旦被拉进群，群里每个人的消息都会走到这里：
+    // 陌生成员会触发「拒绝访问」并**回进群里**——既刷屏，又等于向全群公告
+    // 「这个机器人有白名单、以及谁不在名单里」。命令入口是单人通道，群场景走企业微信。
+    if (msg.chat && msg.chat.type && msg.chat.type !== 'private') {
+      log.debug('telegram: 忽略非私聊消息', { chatType: msg.chat.type, chatId: msg.chat.id });
+      return null;
+    }
     const from = msg.from ? String(msg.from.id) : '';
     const reply = await router.handle(msg.text, from, { channel: 'telegram' });
     await sendMessage(msg.chat.id, reply);
@@ -83,13 +90,16 @@ function createTelegramAdapter({
           log.warn('telegram: 令牌校验失败（继续重试）', { error: String(e && e.message || e) });
         }
       }
-      // 启动时丢弃积压（宕机期间的消息不回放），避免对过期命令刷屏
+      // 启动时丢弃积压（宕机期间的消息不回放），避免对过期命令刷屏。
+      // 注意 offset=-1 的语义是「只要最后一条更新」，所以这里拿到的是最后一条的
+      // update_id；把 offset 推到它后面，中间的积压就整段跳过。日志说 skipped
+      // 而不是 dropped=N——N 最多是 1，报个数会让人以为只丢了一条。
       if (drainBacklog) {
         try {
           const backlog = await getUpdates(-1);
           if (Array.isArray(backlog) && backlog.length > 0) {
             cur = backlog[backlog.length - 1].update_id + 1;
-            log.info('telegram: 丢弃宕机期间积压', { dropped: backlog.length });
+            log.info('telegram: 已跳过宕机期间积压', { offsetAdvancedTo: cur });
           }
         } catch (e) { /* 丢弃失败不阻塞启动 */ }
       }

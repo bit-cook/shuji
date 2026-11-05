@@ -43,6 +43,8 @@ function createMissionControl({
     now,
     staleSec: config.staleSec,
     tasksPerAgent: config.tasksPerAgent,
+    heartbeatsPerAgent: config.heartbeatsPerAgent,
+    maxDetailBytes: config.maxDetailBytes,
     maxTaskTitle: config.maxTaskTitle,
     logger: log,
   });

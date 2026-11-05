@@ -26,7 +26,10 @@ function createConfirmStore({
       const oldest = pending.keys().next().value;
       pending.delete(oldest);
     }
-    const token = crypto.randomBytes(4).toString('hex').toUpperCase();
+    // 6 字节（48 bit）而不是 4：确认令牌是「知道它就能执行危险命令」的凭证，
+    // 虽然 60s TTL + 仅发起人 + 限流已经把暴力破解堵得差不多，但没有理由
+    // 在这里省 2 个字节。8 个十六进制位短到用户还会抄错。
+    const token = crypto.randomBytes(6).toString('hex').toUpperCase();
     pending.set(token, { token, fromUser, text, expiresAt: now() + ttlMs });
     return token;
   }

@@ -135,3 +135,30 @@ test('from 为数字时也能命中白名单（JSON 里常见）', async () => {
     assert.match((await res.json()).reply, /^pong/);
   });
 });
+
+// ---- 请求体上限必须按**字节**算，不是字符串长度 ----
+test('请求体上限按字节判：中文报文不会绕过限幅', async () => {
+  // 中文 1 字 3 字节。若用 body.length 累计，1MB 的「上限」实际能放进 3MB，
+  // 而 Content-Length 那道是按字节判的——两边不同口径等于限幅没生效。
+  const adapter = createHttpAdapter({ router: makeRouter(), maxBodyBytes: 2000 });
+  await withServer(adapter, async (base) => {
+    const port = new URL(base).port;
+    const payload = JSON.stringify({ from: 'me', text: '\u547d'.repeat(1000) });
+    assert.ok(Buffer.byteLength(payload) > 2000, '报文应超字节上限');
+    assert.ok(payload.length < 2000, '但字符串长度在上限以内（这正是漏洞所在）');
+
+    const status = await new Promise((resolve, reject) => {
+      const s = net.connect(port, '127.0.0.1', () => {
+        s.write(
+          'POST /message HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n' +
+          `Content-Length: ${Buffer.byteLength(payload)}\r\nConnection: close\r\n\r\n` + payload,
+        );
+      });
+      let buf = '';
+      s.on('data', (c) => { buf += c; });
+      s.on('error', reject);
+      s.on('close', () => resolve(buf.split(' ')[1] || ''));
+    });
+    assert.equal(status, '413', `应按字节判为 413，实际 ${status}`);
+  });
+});

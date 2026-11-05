@@ -157,7 +157,7 @@ test('确认令牌：待确认数量有上限（不会无限增长）', () => {
 test('审计留痕：confirm 全链路（先 confirm_required 后 ok 且带 confirmed）', async () => {
   const { router, auditLog } = makeRouter();
   const pending = await router.handle('/dispatch node-a 巡检', 'me');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   await router.handle(`/confirm ${token}`, 'me');
   assert.equal(auditLog[0].result, 'confirm_required');
   assert.equal(auditLog[1].result, 'ok');

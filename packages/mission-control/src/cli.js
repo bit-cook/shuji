@@ -35,6 +35,8 @@ function printHelp() {
     '  MC_AUDIT_LOG        审计 JSONL，默认 audit.jsonl（none 关闭）',
     '  MC_STALE_SEC        心跳超过该秒数无更新 → /list 报 offline，默认 900',
     '  MC_TASKS_PER_AGENT  每 Agent 保留任务数上限，默认 500',
+    '  MC_HEARTBEATS_PER_AGENT  每 Agent 保留的心跳流水条数，默认 200（0 = 不清理，会告警）',
+    '  MC_MAX_DETAIL_BYTES 心跳 detail 大小上限，默认 8192（防失灵的 Agent 撑爆库）',
     '  MC_RATE_LIMIT_PER_MIN / MC_RATE_LIMIT_BURST   每 IP 限流，默认 600 / 200',
     '  LOG_LEVEL           debug | info | warn | error，默认 info',
     '',

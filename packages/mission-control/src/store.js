@@ -13,6 +13,9 @@
  *   - 写路径只认明确的状态跃迁，重复 claim / complete 返回可读原因而不是静默成功
  *   - 任务按 Agent 保留上限裁剪，避免长期运行把库撑大
  */
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+
 let sqlite;
 try {
   sqlite = require('node:sqlite');
@@ -83,6 +86,12 @@ function openDatabase(dbPath) {
   db.exec('PRAGMA synchronous = NORMAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // 数据库里是 Agent 明细与任务标题（可能含机密），权限收到 0600。
+  // 目录级 750 是另一道防线，但「目录权限哪天被放宽了」不该顺带把数据送出去。
+  // WAL  pragma 一执行就会生成 -wal / -shm，所以放在这三行之后一起收。
+  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    try { fs.chmodSync(f, 0o600); } catch { /* 文件不存在或无权改：忽略 */ }
+  }
   for (const [table, column, decl] of MIGRATIONS) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all();
     if (!cols.some((c) => c.name === column)) {
@@ -126,15 +135,22 @@ function toMillis(v, fallback = 0) {
   return n < 1e11 ? Math.floor(n * 1000) : Math.floor(n);
 }
 
-function newTaskId(now, rand = Math.random) {
-  return 'task-' + now.toString(36) + '-' + Math.floor(rand() * 0xffffff).toString(36).padStart(4, '0');
+function newTaskId(now, rand = crypto.randomBytes) {
+  // 随机部分用 crypto 而不是 Math.random：任务 ID 是 claim/complete 的「口令」，
+  // Math.random 的种子可预测，等于把任务领取权交给能观察 ID 序列的人。
+  // 这两个端点虽然都要求 Bearer MC_API_KEY，但没有理由在这里用弱随机。
+  return 'task-' + now.toString(36) + '-' + rand(3).toString('hex');
 }
 
 /**
  * 归一化心跳报文：兼容 generic 协议包装与裸字段两种写法。
  * 返回 { agentId, status, reportedAt, framework, model, detail, usage } 或 null。
+ *
+ * maxDetailBytes：detail 的大小上限。心跳是周期性自动上报的，一个失灵的 Agent
+ * （或恶意的）每周期塞进一大坨 JSON，就能把库撑爆——而控制面是要长期常驻的。
+ * 超限时保留可读的摘要而不是整条拒绝：拒绝会让 Agent 直接掉线，更糟。
  */
-function normalizeHeartbeat(body) {
+function normalizeHeartbeat(body, maxDetailBytes = 8192) {
   if (!body || typeof body !== 'object') return null;
   const p = (body.payload && typeof body.payload === 'object') ? body.payload : body;
   const agentId = String(p.agentId ?? p.agent_id ?? p.id ?? '').trim();
@@ -148,12 +164,36 @@ function normalizeHeartbeat(body) {
     reportedAt: toMillis(p.reportedAt ?? p.reported_at ?? p.lastSeenAt, 0) || null,
     framework: String(body.framework ?? p.framework ?? 'generic').trim() || 'generic',
     model: String(p.model ?? detail.model ?? '').trim() || null,
-    detail,
+    detail: capDetail(detail, maxDetailBytes),
     usage: usageSrc ? {
       tokens: nonNegInt(usageSrc.tokens, 0),
       costUsd: nonNegFloat(usageSrc.costUsd, 0),
     } : null,
   };
+}
+
+/** detail 超限时截成摘要；返回的仍是对象（调用方直接 JSON.stringify）。 */
+function capDetail(detail, maxBytes) {
+  const limit = Number(maxBytes);
+  if (!(limit > 0)) return detail;
+  let text = JSON.stringify(detail);
+  if (Buffer.byteLength(text) <= limit) return detail;
+  // 逐键丢弃，优先保留小字段；实在放不下就给摘要
+  const kept = {};
+  let bytes = 2; // {} 的余量
+  for (const [k, v] of Object.entries(detail)) {
+    let piece;
+    try { piece = JSON.stringify(k) + ':' + JSON.stringify(v); } catch { continue; }
+    const cost = Buffer.byteLength(piece) + 1;
+    if (bytes + cost > limit) continue;
+    kept[k] = v;
+    bytes += cost;
+  }
+  text = JSON.stringify(kept);
+  if (Buffer.byteLength(text) <= limit) {
+    return { ...kept, _detailTruncated: true, _detailBytes: Buffer.byteLength(JSON.stringify(detail)) };
+  }
+  return { _detailTruncated: true, _detailBytes: Buffer.byteLength(JSON.stringify(detail)) };
 }
 
 function createStore({
@@ -162,6 +202,8 @@ function createStore({
   staleSec = 900,
   tasksPerAgent = 500,
   maxTaskTitle = 4000,
+  heartbeatsPerAgent = 200,
+  maxDetailBytes = 8192,
   logger = null,
 } = {}) {
   if (!dbPath) throw new Error('createStore 需要 dbPath');
@@ -205,6 +247,13 @@ function createStore({
   `);
   const stmtInsertHeartbeat = db.prepare(`
     INSERT INTO heartbeats (agentId, status, reportedAt, detail) VALUES (?, ?, ?, ?)
+  `);
+  // 心跳流水按 Agent 保留上限裁剪。这张表只增不删的话，长期常驻的控制面
+  // 会被自己的心跳撑爆：默认 300s 一个周期，一年就是 ~10 万行/Agent。
+  const stmtPruneHeartbeats = db.prepare(`
+    DELETE FROM heartbeats WHERE agentId = ? AND id NOT IN (
+      SELECT id FROM heartbeats WHERE agentId = ? ORDER BY id DESC LIMIT ?
+    )
   `);
   const stmtCounts = db.prepare(`
     SELECT
@@ -266,7 +315,7 @@ function createStore({
 
   /** 心跳注册/更新。返回更新后的 agent（公开形状）。 */
   function applyHeartbeat(body) {
-    const hb = normalizeHeartbeat(body);
+    const hb = normalizeHeartbeat(body, maxDetailBytes);
     if (!hb) return { ok: false, reason: 'bad_payload' };
     const at = now();
     const reportedAt = hb.reportedAt || at;
@@ -285,8 +334,20 @@ function createStore({
       at,
     );
     stmtInsertHeartbeat.run(hb.agentId, hb.status, reportedAt, detailJson);
+    pruneHeartbeats(hb.agentId);
     if (log) log.info('agent heartbeat', { agentId: hb.agentId, status: hb.status });
     return { ok: true, agent: toAgent(stmtGetAgent.get(hb.agentId), at) };
+  }
+
+  /** 按 Agent 裁剪心跳流水；heartbeatsPerAgent<=0 表示不清理（显式 opt-in）。 */
+  function pruneHeartbeats(agentId) {
+    if (heartbeatsPerAgent <= 0) return 0;
+    const r = stmtPruneHeartbeats.run(agentId, agentId, heartbeatsPerAgent);
+    const removed = Number(r.changes) || 0;
+    if (removed > 0 && log) {
+      log.debug('heartbeats pruned', { agentId, removed, keep: heartbeatsPerAgent });
+    }
+    return removed;
   }
 
   function listAgents() {
@@ -442,11 +503,12 @@ function createStore({
   return {
     applyHeartbeat, listAgents, getAgent, listTasks, getTask,
     createTask, claimTask, completeTask, costSummary, counts, pruneTasks, close,
+    pruneHeartbeats,
     isOpenStatus: (s) => OPEN_STATUS.has(s),
   };
 }
 
 module.exports = {
-  createStore, openDatabase, normalizeHeartbeat, newTaskId,
+  createStore, openDatabase, normalizeHeartbeat, capDetail, newTaskId,
   sqliteAvailable, TASK_STATUS, OPEN_STATUS, SCHEMA,
 };

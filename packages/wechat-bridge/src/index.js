@@ -12,6 +12,15 @@ const { createLogger } = require('./log');
 
 const ADAPTERS = ['http', 'telegram', 'wecom'];
 
+/** 配置错误：与 mission-control 的 ConfigError 同构，便于两层用同一套处理。 */
+class ConfigError extends Error {
+  constructor(errors) {
+    super(Array.isArray(errors) ? errors.join('\n  - ') : String(errors));
+    this.name = 'ConfigError';
+    this.errors = Array.isArray(errors) ? errors : [String(errors)];
+  }
+}
+
 function splitList(v) {
   return String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
 }
@@ -65,24 +74,29 @@ function validateConfig(env = process.env) {
     }
   }
   // 一个进程只跑一个适配器，白名单取并集不会越权（微信消息到不了 telegram 适配器）。
-  // 但「配了另一个入口的白名单、当前入口却是空的」是个坑：服务能起来，
-  // 然后每一个真实用户都被拒——配了却没人能用，比启动失败更难发现。
-  if (adapter === 'telegram' && telegramFrom.length === 0 && wechatFrom.length > 0) {
-    warnings.push('ADAPTER=telegram 但 TELEGRAM_ALLOW_FROM 为空：服务会启动，但所有 Telegram 用户都会被拒（只有 WECHAT_ALLOW_FROM 生效，而微信消息到不了这个适配器）');
+  // 但「当前适配器自己的白名单是空的」意味着这个进程永远服务不了任何真实用户——
+  // 没有一种正当配置长这样，所以按错误处理：起来也是白起来，还不如启动失败。
+  if (adapter === 'telegram' && telegramFrom.length === 0) {
+    errors.push('ADAPTER=telegram 但 TELEGRAM_ALLOW_FROM 为空：Telegram 消息只会到达这个适配器，白名单为空则所有用户都会被拒（服务能启动，但永远服务不了任何人）');
   }
-  if (adapter !== 'telegram' && wechatFrom.length === 0 && telegramFrom.length > 0) {
-    warnings.push(`ADAPTER=${adapter} 但 WECHAT_ALLOW_FROM 为空：服务会启动，但所有${adapter === 'wecom' ? '企业微信' : 'HTTP'}用户都会被拒（只有 TELEGRAM_ALLOW_FROM 生效，而 Telegram 消息到不了这个适配器）`);
+  if (adapter !== 'telegram' && wechatFrom.length === 0) {
+    errors.push(`ADAPTER=${adapter} 但 WECHAT_ALLOW_FROM 为空：${adapter === 'wecom' ? '企业微信' : 'HTTP/OpenClaw'} 消息只会到达这个适配器，白名单为空则所有用户都会被拒（服务能启动，但永远服务不了任何人）`);
   }
   if (adapter !== 'telegram') {
     const host = env.HOST || '127.0.0.1';
     const port = Number(env.PORT || 8080);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push(`PORT 非法：${env.PORT}`);
+    // PORT=0 = 让内核挑空闲端口（测试与临时排障用）。它会在启动日志里打出真实端口，
+    // 所以不算是「配了却没生效」；但生产环境写 0 几乎一定是笔误，给警告。
+    if (!Number.isInteger(port) || port < 0 || port > 65535) errors.push(`PORT 非法：${env.PORT}`);
+    if (port === 0) warnings.push('PORT=0：由内核分配随机端口，仅适合测试/临时排障；生产环境请写固定端口');
     if (!env.BRIDGE_TOKEN) {
       warnings.push('未配置 BRIDGE_TOKEN：/message 与 /openclaw 端点无鉴权（仅靠回环/内网绑定保护）');
     }
-    if (!env.AUDIT_LOG) {
-      warnings.push('未配置 AUDIT_LOG：将写入当前目录 audit.jsonl（红线：全量审计默认开启）');
-    }
+  }
+  // 审计与适配器无关：telegram 长轮询同样全量留痕，漏配 AUDIT_LOG 时它会静默写进
+  // 当前工作目录（用户级单元的 cwd 就是 $HOME）——所以这条告警对所有适配器都生效。
+  if (!env.AUDIT_LOG) {
+    warnings.push('未配置 AUDIT_LOG：将写入当前目录 audit.jsonl（红线：全量审计默认开启）');
   }
   return { ok: errors.length === 0, errors, warnings, adapter, allowFrom, wechatFrom, telegramFrom };
 }
@@ -105,15 +119,28 @@ function guardPublicBind(host, adapter, env = process.env) {
 
 /**
  * 从环境变量装配整桥。返回 { router, server?, stats?, logger } 或 telegram 时的 { router, polling }。
+ *
+ * 启动前先跑一遍 validateConfig：光有 --check 不够——systemd / compose 起服务时没人会
+ * 手动加那个参数，于是「配了却没生效」的错（如 telegram 适配器只配了微信白名单）
+ * 会以一个正常启动、然后拒绝每一个真实用户的形式存在，日志里一行提示都没有。
+ * errors 直接抛（启动失败比静默拒绝好），warnings 打进日志。
  */
 function createBridgeFromEnv(env = process.env) {
+  const pre = validateConfig(env);
+  const logger = createLogger({ base: { app: 'wechat-bridge' } });
+  for (const w of pre.warnings) logger.warn(w);
+  if (!pre.ok) {
+    const err = new ConfigError(pre.errors);
+    err.warnings = pre.warnings;
+    throw err;
+  }
+
   // 命令入口白名单（红线）：微信 ID 与 Telegram 用户 ID 合并，至少配置一个。
   const allowFrom = [...splitList(env.WECHAT_ALLOW_FROM), ...splitList(env.TELEGRAM_ALLOW_FROM)];
   if (allowFrom.length === 0) {
-    throw new Error('WECHAT_ALLOW_FROM / TELEGRAM_ALLOW_FROM 至少配置一个（命令入口白名单，红线）');
+    throw new ConfigError(['WECHAT_ALLOW_FROM / TELEGRAM_ALLOW_FROM 至少配置一个（命令入口白名单，红线）']);
   }
 
-  const logger = createLogger({ base: { app: 'wechat-bridge' } });
   const mc = createMcClient({
     base: env.MC_BASE,
     apiKey: env.MC_API_KEY,
@@ -187,5 +214,5 @@ function createBridgeFromEnv(env = process.env) {
 module.exports = {
   createRouter, createMcClient, createAudit, createConfirmStore,
   createHttpAdapter, createWecomAdapter, createWecomNotifier, createTelegramAdapter,
-  createBridgeFromEnv, listen, validateConfig, ADAPTERS,
+  createBridgeFromEnv, listen, validateConfig, ADAPTERS, ConfigError,
 };

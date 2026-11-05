@@ -77,7 +77,7 @@ test('/dispatch 先要令牌，确认后才真正下发', async () => {
   const mc = fakeMc();
   const { router, auditLog } = makeRouter(mc);
   const pending = await router.handle('/dispatch node-a 跑一次巡检', 'me');
-  const m = pending.match(/\/confirm ([0-9A-F]{8})/);
+  const m = pending.match(/\/confirm ([0-9A-F]{8,})/);
   assert.ok(m, '应返回确认令牌: ' + pending);
   assert.equal(mc.calls.length, 0, '未确认前不得调用管理面');
   assert.equal(auditLog.at(-1).result, 'confirm_required');
@@ -86,11 +86,11 @@ test('/dispatch 先要令牌，确认后才真正下发', async () => {
   assert.match(wrong, /确认失败/);
 
   const other = await router.handle('/dispatch node-a 跑一次巡检', 'me');
-  const m2 = other.match(/\/confirm ([0-9A-F]{8})/);
+  const m2 = other.match(/\/confirm ([0-9A-F]{8,})/);
   // 另一名白名单用户拿别人的令牌：发起人不匹配
   const { router: r2 } = makeRouter(fakeMc(), { allowFrom: ['me', 'you'] });
   const p2 = await r2.handle('/dispatch node-a y', 'me');
-  const tok2 = p2.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const tok2 = p2.match(/\/confirm ([0-9A-F]{8,})/)[1];
   const mismatch = await r2.handle(`/confirm ${tok2}`, 'you');
   assert.match(mismatch, /令牌与发起人不一致/);
   assert.equal(m2 !== null, true);
@@ -108,7 +108,7 @@ test('确认令牌 60 秒后过期', async () => {
   const confirmStore = createConfirmStore({ ttlMs: 60000, now: () => t });
   const { router } = makeRouter(fakeMc(), { confirmStore });
   const pending = await router.handle('/dispatch node-a x', 'me');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   t += 60001;
   const r = await router.handle(`/confirm ${token}`, 'me');
   assert.match(r, /确认已过期/);
@@ -127,7 +127,7 @@ test('/dispatch 打到未注册 Agent 时提示未找到，而不是暴露 404',
   const mc = { ...fakeMc(), async post() { throw err; } };
   const { router, auditLog } = makeRouter(mc);
   const pending = await router.handle('/dispatch ghost 跑一次', 'me');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   const r = await router.handle(`/confirm ${token}`, 'me');
   assert.match(r, /未找到 Agent：ghost/);
   assert.equal(auditLog.at(-1).result, 'error');
@@ -137,7 +137,7 @@ test('/dispatch 成功后提示标题被控制面截断', async () => {
   const mc = { ...fakeMc(), async post() { return { ok: true, task: { id: 't-1' }, titleTruncated: true }; } };
   const { router } = makeRouter(mc);
   const pending = await router.handle('/dispatch node-a ' + 'x'.repeat(20), 'me');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   const r = await router.handle(`/confirm ${token}`, 'me');
   assert.match(r, /已下发/);
   assert.match(r, /已按上限截断/);
@@ -148,7 +148,7 @@ test('/dispatch 其他错误仍原样透出', async () => {
   const mc = { ...fakeMc(), async post() { throw err; } };
   const { router } = makeRouter(mc);
   const pending = await router.handle('/dispatch node-a x', 'me');
-  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const token = pending.match(/\/confirm ([0-9A-F]{8,})/)[1];
   const r = await router.handle(`/confirm ${token}`, 'me');
   assert.match(r, /处理失败：管理面返回 500/);
 });

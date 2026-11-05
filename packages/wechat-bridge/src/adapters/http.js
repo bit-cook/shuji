@@ -91,8 +91,11 @@ function createHttpAdapter({
       }
       let body = '';
       req.on('data', (c) => {
+        // 按**字节**累计，不是字符串长度：中文 1 字 = 3 字节，用 body.length 的话
+        // 实际放进内存的会是声明上限的三倍（Content-Length 那道是按字节判的，
+        // 两边不同口径等于限幅没生效）。
         body += c;
-        if (body.length > maxBodyBytes) rejectTooLarge(req, res); // 分块上传兜底
+        if (Buffer.byteLength(body) > maxBodyBytes) rejectTooLarge(req, res);
       });
       req.on('end', async () => {
         if (res.writableEnded) return;

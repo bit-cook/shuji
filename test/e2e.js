@@ -134,7 +134,7 @@ async function main() {
 
     // T7 调度：dispatch 二次确认后任务落库
     const pending = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch node-openclaw 夜间巡检一次' });
-    const token = (pending.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
+    const token = (pending.match(/\/confirm ([0-9A-F]{8,})/) || [])[1];
     const dispatched = await postJson(BRIDGE + '/message', { from: ALLOW, text: `/confirm ${token}` });
     const taskOk = dispatched.includes('已下发') && mc.tasks.some((t) => t.agentId === 'node-openclaw' && t.title === '夜间巡检一次');
     report('T7', '调度：dispatch 二次确认后任务下发', taskOk, dispatched.slice(0, 60));
@@ -225,7 +225,7 @@ async function main() {
     // T12 确认令牌：一次性 + 发起人不一致即拒
     {
       const p1 = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: '/dispatch node-a 一次性校验' });
-      const tok = p1.match(/\/confirm ([0-9A-F]{8})/)[1];
+      const tok = p1.match(/\/confirm ([0-9A-F]{8,})/)[1];
       const used = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: `/confirm ${tok}` });
       const reused = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: `/confirm ${tok}` });
       const wrongUser = await postJson(BRIDGE3 + '/message', { from: 'stranger', text: `/confirm ${tok}` });
@@ -420,10 +420,10 @@ async function realControlPlaneSection() {
     hermesStub.close();
 
     const dispatch = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch hermes-node-b 夜间巡检一次' });
-    const token = (dispatch.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
+    const token = (dispatch.match(/\/confirm ([0-9A-F]{8,})/) || [])[1];
     const confirmed = token ? await postJson(BRIDGE + '/message', { from: ALLOW, text: '/confirm ' + token }) : '';
     const ghost = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch ghost x' });
-    const ghostTok = (ghost.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
+    const ghostTok = (ghost.match(/\/confirm ([0-9A-F]{8,})/) || [])[1];
     const ghostReply = ghostTok ? await postJson(BRIDGE + '/message', { from: ALLOW, text: '/confirm ' + ghostTok }) : '';
     report('T18', '真控制面：/dispatch 落库；未注册 Agent 提示「未找到」',
       /已下发/.test(confirmed) && /未找到 Agent：ghost/.test(ghostReply),

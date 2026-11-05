@@ -414,3 +414,81 @@ describe('报文归一化', () => {
     }
   });
 });
+
+// ---- 心跳流水与 detail 的体积上限：控制面要长期常驻，不能被自己的心跳撑爆 ----
+describe('心跳流水保留上限', () => {
+  test('超过 heartbeatsPerAgent 的行被裁掉，只留最近 N 条', () => {
+    const s = freshStore({ now: () => 1700000000000, heartbeatsPerAgent: 5 });
+    for (let i = 0; i < 12; i++) {
+      s.applyHeartbeat({ payload: { agentId: 'a', status: 'online', reportedAt: 1700000000 + i } });
+    }
+    const c = s.counts();
+    assert.equal(c.heartbeats, 5, `应只保留 5 条，实际 ${c.heartbeats}`);
+  });
+
+  test('保留的是最近的那些，不是最旧的', () => {
+    const s = freshStore({ now: () => 1700000000000, heartbeatsPerAgent: 3 });
+    for (let i = 1; i <= 6; i++) {
+      s.applyHeartbeat({ payload: { agentId: 'a', status: 'online', detail: { seq: i } } });
+    }
+    // Agent 行始终是最新一份心跳的 detail
+    assert.equal(s.getAgent('a').detail.seq, 6);
+    const c = s.counts();
+    assert.equal(c.heartbeats, 3);
+  });
+
+  test('按 Agent 分别计数：一个话痨 Agent 不会冲掉别人的历史', () => {
+    const s = freshStore({ now: () => 1700000000000, heartbeatsPerAgent: 4 });
+    for (let i = 0; i < 20; i++) {
+      s.applyHeartbeat({ payload: { agentId: 'chatty', status: 'online' } });
+      if (i % 5 === 0) s.applyHeartbeat({ payload: { agentId: 'quiet', status: 'online' } });
+    }
+    const c = s.counts();
+    assert.equal(c.heartbeats, 4 + 4, `chatty 4 + quiet 4，实际 ${c.heartbeats}`);
+  });
+
+  test('heartbeatsPerAgent=0 显式关闭清理（默认不是这个）', () => {
+    const s = freshStore({ now: () => 1700000000000, heartbeatsPerAgent: 0 });
+    for (let i = 0; i < 10; i++) {
+      s.applyHeartbeat({ payload: { agentId: 'a', status: 'online' } });
+    }
+    assert.equal(s.counts().heartbeats, 10);
+  });
+});
+
+describe('心跳 detail 大小上限', () => {
+  test('超大 detail 被裁到上限以内，且带截断标记', () => {
+    const big = { blob: 'x'.repeat(50000), keep: 'small' };
+    const h = normalizeHeartbeat({ payload: { agentId: 'a', detail: big } }, 2048);
+    const size = Buffer.byteLength(JSON.stringify(h.detail));
+    assert.ok(size <= 2048, `detail 应 <= 2048 字节，实际 ${size}`);
+    assert.equal(h.detail._detailTruncated, true);
+  });
+
+  test('上限内的 detail 原样保留，不加标记', () => {
+    const h = normalizeHeartbeat({ payload: { agentId: 'a', detail: { a: 1, b: 'x' } } }, 2048);
+    assert.deepEqual(h.detail, { a: 1, b: 'x' });
+  });
+
+  test('裁到库里的 detail 也受上限约束（agents 行不会变成大字段）', () => {
+    const s = freshStore({ now: () => 1700000000000, maxDetailBytes: 1024 });
+    s.applyHeartbeat({ payload: { agentId: 'a', status: 'online', detail: { blob: 'y'.repeat(40000) } } });
+    const a = s.getAgent('a');
+    assert.ok(Buffer.byteLength(JSON.stringify(a.detail)) <= 1024, 'agent.detail 超限');
+    assert.equal(a.detail._detailTruncated, true);
+  });
+
+  test('Agent 本身照常注册：detail 超限不该让 Agent 掉线', () => {
+    const s = freshStore({ now: () => 1700000000000, maxDetailBytes: 512 });
+    const r = s.applyHeartbeat({ payload: { agentId: 'a', status: 'online', detail: { blob: 'z'.repeat(9000) } } });
+    assert.equal(r.ok, true);
+    assert.equal(r.agent.agentId, 'a');
+    assert.equal(r.agent.status, 'online');
+  });
+
+  test('capDetail：maxBytes<=0 表示不限制', () => {
+    const { capDetail } = require('../src/store');
+    const d = { a: 'x'.repeat(1000) };
+    assert.equal(capDetail(d, 0), d);
+  });
+});

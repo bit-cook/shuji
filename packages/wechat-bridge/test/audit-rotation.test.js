@@ -66,3 +66,32 @@ test('注入 fs 实现可单测（不碰真实磁盘）', () => {
   assert.equal(lines.length, 1);
   assert.match(lines[0][1], /"result":"ok"/);
 });
+
+// ---- 审计文件的权限：被外部删掉后重建，不能沿用进程 umask ----
+test('审计：文件被外部删除后重建，仍是 0600', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cardinal-audit-'));
+  const file = path.join(dir, 'a.jsonl');
+  const a = createAudit({ file });
+  a.record({ from: 'me', cmd: '/ping' });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+
+  // 模拟外部清理（logrotate 之外的任何 rm）：进程不知道文件没了
+  fs.rmSync(file);
+  a.record({ from: 'me', cmd: '/ping' });
+
+  const mode = fs.statSync(file).mode & 0o777;
+  assert.equal(mode, 0o600,
+    `重建的审计文件权限应为 0600，实际 ${mode.toString(8)}——审计含用户 ID 与命令原文`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('审计：轮转出来的 .1 文件也是 0600', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cardinal-audit-'));
+  const file = path.join(dir, 'b.jsonl');
+  const a = createAudit({ file, maxBytes: 200, keep: 2 });
+  for (let i = 0; i < 40; i++) a.record({ from: 'me', cmd: '/ping', n: i });
+  const rotated = `${file}.1`;
+  assert.ok(fs.existsSync(rotated), '应发生轮转');
+  assert.equal(fs.statSync(rotated).mode & 0o777, 0o600);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

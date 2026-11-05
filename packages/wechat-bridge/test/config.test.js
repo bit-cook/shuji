@@ -35,28 +35,30 @@ const NO_WECHAT = {
 };
 const TG = { ADAPTER: 'telegram', TELEGRAM_BOT_TOKEN: 'T' };
 
-test('validateConfig：ADAPTER=telegram 且只配了微信白名单时放行但告警', () => {
+test('validateConfig：ADAPTER=telegram 却没配 Telegram 白名单 → 启动即失败', () => {
   // 一个进程只跑一个适配器，白名单取并集不会越权（微信消息到不了 telegram 适配器）。
-  // 但「配了另一个入口、当前入口是空的」是个坑：服务能起来，然后每个真实用户都被拒。
+  // 但 Telegram 消息也只会到这个适配器——它自己的白名单为空，服务就是白起来：
+  // 能启动、不报错，然后拒绝每一个真实用户。没有正当配置长这样，按错误处理。
   const r = validateConfig({ ...NO_WECHAT, ...TG, WECHAT_ALLOW_FROM: 'wx-me' });
-  assert.equal(r.ok, true, JSON.stringify(r.errors));
-  assert.ok(r.warnings.some((w) => /TELEGRAM_ALLOW_FROM 为空/.test(w)), JSON.stringify(r.warnings));
+  assert.equal(r.ok, false, JSON.stringify(r.errors));
+  assert.ok(r.errors.some((e) => /TELEGRAM_ALLOW_FROM 为空/.test(e)), JSON.stringify(r.errors));
+  // 另一入口的白名单确实进了并集（不会因为报错就丢弃）
   assert.deepEqual(r.allowFrom, ['wx-me']);
 });
 
-test('validateConfig：ADAPTER=http 且只配了 Telegram 白名单时告警', () => {
+test('validateConfig：ADAPTER=http 却没配微信白名单 → 启动即失败', () => {
   const r = validateConfig({ ...NO_WECHAT, ADAPTER: 'http', TELEGRAM_ALLOW_FROM: 'tg-me' });
-  assert.equal(r.ok, true);
-  assert.ok(r.warnings.some((w) => /WECHAT_ALLOW_FROM 为空/.test(w)), JSON.stringify(r.warnings));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /WECHAT_ALLOW_FROM 为空/.test(e)));
 });
 
-test('validateConfig：ADAPTER=wecom 且只配了 Telegram 白名单时告警', () => {
+test('validateConfig：ADAPTER=wecom 却没配微信白名单 → 启动即失败', () => {
   const r = validateConfig({
     ...NO_WECHAT, ADAPTER: 'wecom', TELEGRAM_ALLOW_FROM: 'tg-me',
     WECOM_TOKEN: 't', WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG', WECOM_CORP_ID: 'ww1',
   });
-  assert.equal(r.ok, true);
-  assert.ok(r.warnings.some((w) => /WECHAT_ALLOW_FROM 为空/.test(w)));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /WECHAT_ALLOW_FROM 为空/.test(e)));
 });
 
 test('validateConfig：两个入口的白名单都填时互不干扰', () => {
@@ -145,6 +147,7 @@ test('装配：ADAPTER=telegram 起长轮询、不监听端口', async () => {
   const b = createBridgeFromEnv({
     ...BASE,
     ADAPTER: 'telegram', TELEGRAM_BOT_TOKEN: 'T',
+    TELEGRAM_ALLOW_FROM: 'tg-me',          // 当前适配器自己的白名单必须非空，否则拒绝装配
     TELEGRAM_API_BASE: `http://127.0.0.1:${port}`,
     TELEGRAM_DRAIN_BACKLOG: '0',
   });
@@ -199,4 +202,54 @@ test('装配：微信 + Telegram 白名单合并生效（两侧 ID 都能过）'
 
 test('createTelegramAdapter：默认构造即可用（token 缺失才抛错）', () => {
   assert.throws(() => createTelegramAdapter({ router: { handle: async () => '' } }), /TELEGRAM_BOT_TOKEN/);
+});
+
+// ---- 启动即校验：光有 --check 不够，systemd/compose 起服务时没人会加那个参数 ----
+test('装配：配置错了就抛错，不让「能启动但服务不了任何人」的进程跑起来', () => {
+  // telegram 适配器 + 只有微信白名单：validateConfig 给的是警告时，这个进程会
+  // 正常启动、然后拒绝每一个真实用户，日志里一行提示都没有。
+  assert.throws(
+    () => createBridgeFromEnv({ ...NO_WECHAT, ...TG, WECHAT_ALLOW_FROM: 'wx-me' }),
+    /TELEGRAM_ALLOW_FROM 为空/,
+  );
+  // 开关拼错同理：此前只有 --check 会报，服务照起
+  assert.throws(
+    () => createBridgeFromEnv({ ...NO_WECHAT, ...TG, TELEGRAM_ALLOW_FROM: '1', TELEGRAM_VALIDATE_TOKEN: 'yes' }),
+    /TELEGRAM_VALIDATE_TOKEN/,
+  );
+  // 白名单全空：红线，两种入口都没配
+  assert.throws(() => createBridgeFromEnv({ ...NO_WECHAT, ...TG }), /至少配置一个/);
+});
+
+test('装配：合法配置不带错误地起来（告警只进日志，不阻断）', async () => {
+  const tg = createMockTelegram();
+  const port = await tg.listen();
+  const b = createBridgeFromEnv({
+    ...BASE,
+    ADAPTER: 'telegram', TELEGRAM_BOT_TOKEN: 'T', TELEGRAM_ALLOW_FROM: 'tg-me',
+    TELEGRAM_API_BASE: `http://127.0.0.1:${port}`, TELEGRAM_DRAIN_BACKLOG: '0',
+  });
+  try {
+    assert.ok(b.polling);
+  } finally {
+    b.polling.stop();
+    await tg.close();
+  }
+});
+
+test('validateConfig：AUDIT_LOG 告警对 telegram 适配器也生效', () => {
+  // 审计与适配器无关：长轮询同样全量留痕。漏配时它会静默写进 cwd
+  // （用户级单元的 cwd 就是 $HOME），所以这条告警不能只在 http 分支里。
+  const { AUDIT_LOG: _drop, ...noAudit } = NO_WECHAT;
+  const r = validateConfig({ ...noAudit, ...TG, TELEGRAM_ALLOW_FROM: '1' });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.ok(r.warnings.some((w) => /AUDIT_LOG/.test(w)), JSON.stringify(r.warnings));
+});
+
+test('validateConfig：PORT=0 允许（内核挑端口）但告警，非数字仍拒绝', () => {
+  const zero = validateConfig({ ...BASE, PORT: '0' });
+  assert.equal(zero.ok, true, JSON.stringify(zero.errors));
+  assert.ok(zero.warnings.some((w) => /PORT=0/.test(w)), JSON.stringify(zero.warnings));
+  assert.equal(validateConfig({ ...BASE, PORT: 'abc' }).ok, false);
+  assert.equal(validateConfig({ ...BASE, PORT: '99999' }).ok, false);
 });

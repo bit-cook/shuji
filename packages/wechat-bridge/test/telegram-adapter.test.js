@@ -144,3 +144,59 @@ test('call：Telegram 返回 ok:false 抛错并带 tgError', async () => {
 test('缺 token 直接报错', () => {
   assert.throws(() => createTelegramAdapter({ router: makeRouter() }), /TELEGRAM_BOT_TOKEN/);
 });
+
+// ---- 群聊：机器人一旦被拉进群，群里每个人的消息都会走到这里 ----
+test('handleUpdate：群聊消息被忽略，不往群里回「拒绝访问」', async () => {
+  // 陌生人成员会触发白名单拒绝，而回复发往 msg.chat.id——也就是群。
+  // 那既刷屏，又等于向全群公告「这机器人有白名单、谁不在名单里」。
+  const tg = createMockTelegram();
+  const port = await tg.listen();
+  const adapter = createTelegramAdapter({ router: makeRouter(), token: 'T', apiBase: `http://127.0.0.1:${port}` });
+  const group = {
+    message: {
+      message_id: 9, from: { id: 999 }, text: '/ping',
+      chat: { id: -100123, type: 'group', title: '某群' },
+    },
+  };
+  const r = await adapter.handleUpdate(group);
+  assert.equal(r, null, '群聊消息应被忽略');
+  assert.equal(tg.state.sent.length, 0, '不应往群里发任何东西');
+  await tg.close();
+});
+
+test('handleUpdate：supergroup / channel 同样忽略', async () => {
+  const tg = createMockTelegram();
+  const port = await tg.listen();
+  const adapter = createTelegramAdapter({ router: makeRouter(), token: 'T', apiBase: `http://127.0.0.1:${port}` });
+  for (const type of ['supergroup', 'channel']) {
+    const r = await adapter.handleUpdate({
+      message: { message_id: 1, from: { id: 111 }, text: '/ping', chat: { id: -55, type } },
+    });
+    assert.equal(r, null, type);
+  }
+  assert.equal(tg.state.sent.length, 0);
+  await tg.close();
+});
+
+test('handleUpdate：私聊照常处理（含白名单用户与陌生人）', async () => {
+  const tg = createMockTelegram();
+  const port = await tg.listen();
+  const adapter = createTelegramAdapter({ router: makeRouter(), token: 'T', apiBase: `http://127.0.0.1:${port}` });
+  const priv = {
+    message: { message_id: 2, from: { id: 111 }, text: '/ping', chat: { id: 222, type: 'private' } },
+  };
+  const r = await adapter.handleUpdate(priv);
+  assert.equal(r.from, '111');
+  assert.equal(tg.state.sent.length, 1);
+  assert.match(tg.state.sent[0].text, /^pong/);
+  await tg.close();
+});
+
+test('handleUpdate：chat 缺 type 时按私聊处理（向后兼容旧报文）', async () => {
+  const tg = createMockTelegram();
+  const port = await tg.listen();
+  const adapter = createTelegramAdapter({ router: makeRouter(), token: 'T', apiBase: `http://127.0.0.1:${port}` });
+  const r = await adapter.handleUpdate(msg('/ping', 111)); // msg() 不带 chat.type
+  assert.equal(r.from, '111');
+  await tg.close();
+});

@@ -20,6 +20,8 @@ const DEFAULTS = {
   maxBodyBytes: 1024 * 1024,
   staleSec: 900,        // 超过此时长未心跳 → /list 报 offline；0 = 关闭
   tasksPerAgent: 500,   // 每 Agent 保留的任务条数上限；0 = 不清理
+  heartbeatsPerAgent: 200, // 每 Agent 保留的心跳流水条数；0 = 不清理（不推荐）
+  maxDetailBytes: 8192, // 心跳 detail 的大小上限，防失灵的 Agent 把库撑爆
   maxTaskTitle: 4000,
   requestTimeoutMs: 10000,
 };
@@ -115,6 +117,15 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
   const tasksPerAgent = Math.floor(num(env.MC_TASKS_PER_AGENT, DEFAULTS.tasksPerAgent));
   if (tasksPerAgent < 0) errors.push('MC_TASKS_PER_AGENT 不能为负');
 
+  const heartbeatsPerAgent = Math.floor(num(env.MC_HEARTBEATS_PER_AGENT, DEFAULTS.heartbeatsPerAgent));
+  if (heartbeatsPerAgent < 0) errors.push('MC_HEARTBEATS_PER_AGENT 不能为负');
+  if (heartbeatsPerAgent === 0) {
+    warnings.push('MC_HEARTBEATS_PER_AGENT=0：心跳流水不清理。控制面长期常驻，按默认周期一年就是 ~10 万行/Agent，确认这是有意的');
+  }
+
+  const maxDetailBytes = Math.floor(num(env.MC_MAX_DETAIL_BYTES, DEFAULTS.maxDetailBytes));
+  if (maxDetailBytes < 256) errors.push('MC_MAX_DETAIL_BYTES 至少 256 字节');
+
   const maxTaskTitle = Math.floor(num(env.MC_MAX_TASK_TITLE, DEFAULTS.maxTaskTitle));
   if (maxTaskTitle < 16) errors.push('MC_MAX_TASK_TITLE 至少 16 字符');
 
@@ -124,7 +135,7 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
   for (const key of [
     'MC_AUDIT_MAX_BYTES', 'MC_AUDIT_KEEP', 'MC_RATE_LIMIT_PER_MIN', 'MC_RATE_LIMIT_BURST',
     'MC_MAX_BODY_BYTES', 'MC_STALE_SEC', 'MC_TASKS_PER_AGENT', 'MC_MAX_TASK_TITLE',
-    'MC_REQUEST_TIMEOUT_MS',
+    'MC_REQUEST_TIMEOUT_MS', 'MC_HEARTBEATS_PER_AGENT', 'MC_MAX_DETAIL_BYTES',
   ]) {
     if (!isNumericLiteral(env[key])) errors.push(`${key} 不是数字：${env[key]}`);
   }
@@ -153,6 +164,8 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
       maxBodyBytes,
       staleSec,
       tasksPerAgent,
+      heartbeatsPerAgent,
+      maxDetailBytes,
       maxTaskTitle,
       requestTimeoutMs: Math.floor(num(env.MC_REQUEST_TIMEOUT_MS, DEFAULTS.requestTimeoutMs)),
       logLevel,

@@ -25,7 +25,6 @@ function createAudit({
   const enabled = !!file && file !== 'none';
   const limit = Number(maxBytes) > 0 ? Number(maxBytes) : 0;
   const keepN = Math.max(1, Number(keep) || 1);
-  let ensured = false; // 是否已确认过文件权限
 
   function rotate() {
     if (!limit) return;
@@ -43,7 +42,6 @@ function createAudit({
     }
     try {
       fsx.renameSync(file, file + '.1');
-      ensured = false;
     } catch { /* 忽略 */ }
   }
 
@@ -53,10 +51,11 @@ function createAudit({
       const line = JSON.stringify({ ts: now(), ...entry });
       try {
         rotate();
-        fsx.appendFileSync(file, line + '\n');
-        if (!ensured) {
-          try { fsx.chmodSync(file, mode); ensured = true; } catch { /* 忽略 */ }
-        }
+        // mode 交给 appendFileSync：它只在新文件被创建时才生效，正好覆盖
+        // 「文件被外部删掉后重建」这条路径。早先这里用一个 ensured 闩锁，
+        // 结果文件一旦被外部删除（logrotate 之外的任何清理），重建出来就沿用
+        // 进程 umask——通常是 0644，审计里的用户 ID 与命令原文谁都能读。
+        fsx.appendFileSync(file, line + '\n', { mode });
       } catch (e) {
         process.stderr.write('audit write failed: ' + e.message + '\n');
       }

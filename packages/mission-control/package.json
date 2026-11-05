@@ -1,6 +1,6 @@
 {
   "name": "@cardinal/mission-control",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "枢机 · Cardinal — 控制面：Agent 注册/心跳、任务下发与回收、Token 成本计量（Node 仅标准库 + node:sqlite）",
   "license": "MIT",
