@@ -225,10 +225,16 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   function render() {
-    fetch('panel/api/session', { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (s) { s.authenticated ? load() : loginForm(null); })
-      .catch(function () { loginForm('无法连接控制面'); });
+    // 面板端点一律用绝对路径：相对路径在 /panel/ （带尾斜杠）下会拼成
+    // /panel/panel/... 全部 404，而 404 又会被误显示成「API Key 不正确」。
+    fetch('/panel/api/session', { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 401) { loginForm(null); return null; }
+        if (!r.ok) throw new Error('会话检查失败（HTTP ' + r.status + '）');
+        return r.json();
+      })
+      .then(function (s) { if (s && s.authenticated) load(); })
+      .catch(function (e) { loginForm(e.message); });
   }
 
   function loginForm(err) {
@@ -246,7 +252,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     input.focus();
     function submit() {
       msg.textContent = '';
-      fetch('panel/login', {
+      fetch('/panel/login', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey: input.value }),
@@ -254,7 +260,9 @@ const PAGE_HTML = `<!DOCTYPE html>
         if (r.status === 429) return r.json().then(function (b) {
           throw new Error('尝试过于频繁，请 ' + Math.ceil((b.retryAfterMs || 60000) / 1000) + ' 秒后再试');
         });
-        if (!r.ok) throw new Error('API Key 不正确');
+        if (r.status === 401) throw new Error('API Key 不正确');
+        if (r.status === 503) throw new Error('面板不可用：服务端未配置密钥');
+        if (!r.ok) throw new Error('登录失败（HTTP ' + r.status + '）');
         load();
       }).catch(function (e) { msg.textContent = e.message; });
     }
@@ -263,7 +271,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   function load() {
-    fetch('panel/api/snapshot', { credentials: 'same-origin' })
+    fetch('/panel/api/snapshot', { credentials: 'same-origin' })
       .then(function (r) {
         if (r.status === 401) { loginForm(null); return null; }
         if (!r.ok) throw new Error('快照读取失败（HTTP ' + r.status + '）');
@@ -306,7 +314,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       setTheme(theme() === 'auto' ? 'dark' : theme() === 'dark' ? 'light' : 'auto');
     });
     document.getElementById('out').addEventListener('click', function () {
-      fetch('panel/logout', { method: 'POST', credentials: 'same-origin' })
+      fetch('/panel/logout', { method: 'POST', credentials: 'same-origin' })
         .then(function () { loginForm(null); });
     });
 

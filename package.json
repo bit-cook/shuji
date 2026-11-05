@@ -1,6 +1,6 @@
 {
   "name": "shuji",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "枢机 · Cardinal — Agent OS 控制面实现：Mission-Control（SQLite + 网页面板）、命令路由（微信 iLink 原生 / Telegram / 企业微信 / HTTP 多入口）、Hermes 心跳 Sidecar、部署清单",
   "license": "MIT",

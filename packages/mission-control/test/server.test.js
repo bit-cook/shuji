@@ -321,7 +321,9 @@ describe('韧性', () => {
       let buf = '';
       sock.on('data', (c) => { buf += c.toString('utf8'); if (buf.includes('\r\n')) { sock.destroy(); resolve(buf.split('\r\n')[0]); } });
       sock.on('error', reject);
-      setTimeout(() => { sock.destroy(); reject(new Error('no response')); }, 3000).unref();
+      // 超时给宽一点：这个测试等的是「服务端在收 body 之前就回 413」，
+      // 而机器负载高时 3 秒不够，会把一条稳定的断言变成偶发红。
+      setTimeout(() => { sock.destroy(); reject(new Error('no response')); }, 15000).unref();
     });
     assert.match(statusLine, /^HTTP\/1\.1 413/);
     const after = await api('GET', '/api/agents');

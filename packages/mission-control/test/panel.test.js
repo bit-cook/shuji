@@ -96,6 +96,51 @@ test('GET /panel/api/snapshot：无会话 401', async () => {
   });
 });
 
+test('面板页面：所有 fetch 都是绝对路径（/panel/ 带尾斜杠时不会拼错）', async () => {
+  // 相对路径的坑：用户访问 /panel/ （浏览器很爱补尾斜杠），前端 fetch('panel/login')
+  // 会解析成 /panel/panel/login → 404，而 404 又被显示成「API Key 不正确」，
+  // 于是正确的密钥也进不来，且报错指向完全错误的方向。
+  await withServer(async (base) => {
+    const html = await (await fetch(`${base}/panel`)).text();
+    const paths = [...html.matchAll(/fetch\('([^']+)'/g)].map((m) => m[1]);
+    assert.ok(paths.length >= 4, '应至少覆盖 session / login / snapshot / logout 四处，实际：' + JSON.stringify(paths));
+    for (const p of paths) {
+      assert.ok(p.startsWith('/'), '面板端点必须用绝对路径：' + p);
+      assert.ok(p.startsWith('/panel/'), '面板端点必须挂在 /panel/ 下：' + p);
+    }
+    // 页面里不得残留相对写法
+    assert.ok(!/fetch\('(?!\/)/.test(html), '仍有相对路径的 fetch');
+  });
+});
+
+test('面板端点：/panel/ 带尾斜杠也返回页面，且 /panel/panel/* 明确 404', async () => {
+  await withServer(async (base) => {
+    const page = await fetch(`${base}/panel/`);
+    assert.equal(page.status, 200, '带尾斜杠也要给页面，否则用户看到的是 404 页');
+    assert.match(await page.text(), /枢机 · 控制面板/);
+
+    // 这一条把缺陷钉死：只要前端还在用相对路径，这里必然 404
+    const doubled = await fetch(`${base}/panel/panel/login`, { method: 'POST' });
+    assert.equal(doubled.status, 404, '/panel/panel/login 必须是 404，证明相对路径会拼错');
+
+    const real = await fetch(`${base}/panel/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: API_KEY }),
+    });
+    assert.equal(real.status, 200, '绝对路径的登录端点必须可用');
+  });
+});
+
+test('登录失败按状态码给出准确原因，不把一切都说成密钥错误', async () => {
+  await withServer(async (base) => {
+    const html = await (await fetch(`${base}/panel`)).text();
+    // 401 才对应「API Key 不正确」；503 与其它状态码要有自己的文案
+    assert.match(html, /面板不可用：服务端未配置密钥/);
+    assert.match(html, /登录失败（HTTP /);
+    assert.match(html, /会话检查失败（HTTP /);
+  });
+});
+
 test('登录：正确的 API Key 换到 HttpOnly + SameSite=Strict 的会话 Cookie', async () => {
   await withServer(async (base) => {
     const { res, cookie } = await login(base);
