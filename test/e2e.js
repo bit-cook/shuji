@@ -295,7 +295,7 @@ async function main() {
   console.log(`\n结果：${passed} 通过 / ${failed} 失败（共 ${passed + failed} 项）`);
   console.log('说明：T1–T14 用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器 /openclaw，带 Bearer）；');
   console.log('      Telegram 走长轮询适配器；企业微信备份链路由 T14 覆盖。');
-  console.log('      T15–T20 打的是**真控制面**（真 SQLite + 真 sidecar 子进程 + 真 bridge 进程），验证持久化与心跳纠偏。');
+  console.log('      T15–T22 打的是**真控制面**（真 SQLite + 真 sidecar 子进程 + 真 bridge 进程），验证持久化与心跳纠偏。');
   process.exit(failed === 0 ? 0 : 1);
 }
 
@@ -341,9 +341,6 @@ async function realControlPlaneSection() {
     ...process.env,
     MC_BASE, MC_API_KEY: MC_KEY,
     AGENT_ID: 'hermes-node-b',
-    HERMES_RPC: 'http://127.0.0.1:1/status',   // 必然连不上 → 退化查 systemd
-    SYSTEMD_UNIT: 'hermes-gateway.service',
-    SYSTEMD_SCOPE: 'user',
     INTERVAL: '1',
   };
 
@@ -359,8 +356,21 @@ async function realControlPlaneSection() {
       noTok.status === 401 && badTok.status === 401 && goodTok.status === 200,
       `noTok=${noTok.status} badTok=${badTok.status} good=${goodTok.status}`);
 
+    // Hermes 状态源用本地 stub（T1–T14 同款）：RPC 优先，结果确定，
+    // 不依赖验收机上是否真的装着 hermes-gateway.service。
+    const hermesStub = http.createServer((req, res) => {
+      if (req.url.startsWith('/status')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sessions: 3, version: '0.22.2' }));
+      } else { res.writeHead(404); res.end(); }
+    });
+    await new Promise((r) => hermesStub.listen(0, '127.0.0.1', r));
+
     // 真 sidecar 子进程：心跳一次后退出
-    const sidecar = spawn('python3', [SIDECAR, '--once'], { env: sidecarEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    const sidecar = spawn('python3', [SIDECAR, '--once'], {
+      env: { ...sidecarEnv, HERMES_RPC: `http://127.0.0.1:${hermesStub.address().port}/status` },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let scOut = '';
     sidecar.stdout.on('data', (d) => { scOut += d; });
     sidecar.stderr.on('data', (d) => { scOut += d; });
@@ -376,9 +386,38 @@ async function realControlPlaneSection() {
       hbOk && /hermes-node-b \[online\]/.test(list), `sidecar exit=${scCode} ${list.split('\n')[0]}`);
 
     const status = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/status hermes-node-b' });
-    report('T17', '真控制面：/status 详情含来源与单元信息',
-      /"status": "online"/.test(status) && /hermes-gateway.service/.test(status),
+    report('T17', '真控制面：/status 详情带来源（hermes-rpc）与会话数',
+      /"status": "online"/.test(status) && /"source": "hermes-rpc"/.test(status) && /"sessions": 3/.test(status),
       status.replace(/\s+/g, ' ').slice(0, 160));
+
+    // RPC 不可用 → 退化查 systemd。验收机上未必装着这个单元，
+    // 所以不断言 online/offline，只断言「退化路径真的走到了、
+    // 且把单元名带上了」——作用域识别本身由 sidecar 单测覆盖。
+    const fb = spawn('python3', [SIDECAR, '--once'], {
+      env: {
+        ...sidecarEnv,
+        AGENT_ID: 'hermes-node-fallback',
+        HERMES_RPC: 'http://127.0.0.1:1/status',
+        SYSTEMD_UNIT: 'hermes-gateway.service',
+        SYSTEMD_SCOPE: 'user',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let fbOut = '';
+    fb.stdout.on('data', (d) => { fbOut += d; });
+    fb.stderr.on('data', (d) => { fbOut += d; });
+    const fbCode = await new Promise((r) => fb.on('exit', r));
+    const fbAgent = await (await fetch(MC_BASE + '/api/agents/hermes-node-fallback', {
+      headers: { Authorization: 'Bearer ' + MC_KEY },
+    })).json();
+    report('T17b', 'RPC 不可用时退化查 systemd（来源与单元名进入心跳详情）',
+      fbCode === 0
+      && ['systemd', 'none'].includes(fbAgent.detail && fbAgent.detail.source)
+      && (fbAgent.detail || {}).unit === 'hermes-gateway.service'
+      && (fbOut.includes('"ok": true')),
+      `source=${fbAgent.detail && fbAgent.detail.source} unit=${(fbAgent.detail || {}).unit}`);
+    hermesStub.closeAllConnections();
+    hermesStub.close();
 
     const dispatch = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch hermes-node-b 夜间巡检一次' });
     const token = (dispatch.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
