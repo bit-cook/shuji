@@ -1,7 +1,16 @@
 node_modules/
 *.log
+*.jsonl
 audit.jsonl
 __pycache__/
 *.pyc
 .pytest_cache/
 .env
+*.env
+!*.env.example
+
+# 本机实跑产生的运行时产物（数据库 / 审计日志 / 密钥）
+/deploy/data/
+/deploy/logs/
+mission-control.db
+mission-control.db-*

@@ -64,8 +64,13 @@ hybrid 热加载会应用配置；随后：
 openclaw plugins inspect cardinal-bridge --runtime --json   # 确认两个钩子已注册
 ```
 
-微信侧：按 OpenClaw 官方文档装 `@tencent-weixin/openclaw-weixin` 插件并扫码绑定
-（微信 ClawBot，iLink 协议，仅私聊）。绑定后给机器人发 `/ping`，应直接收到 `pong · …`。
+微信侧：装官方微信通道插件 `@tencent-weixin/openclaw-weixin`（ClawBot / iLink，仅私聊）并扫码绑定：
+
+```bash
+openclaw plugins list | grep -i weixin      # 若未列出，先装上面这个 npm 包
+```
+
+绑定后给机器人发 `/ping`，应直接收到 `pong · …`。
 Telegram 侧无需本插件——枢机桥以 `ADAPTER=telegram` 长轮询直连即可。
 
 ## 配置项

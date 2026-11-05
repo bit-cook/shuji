@@ -1,0 +1,25 @@
+[Unit]
+Description=Shuji Hermes Heartbeat Sidecar
+After=network-online.target cardinal-mission-control.service
+Wants=network-online.target
+
+# 401/403 时 sidecar 以退出码 4 结束：配合 StartLimit 让单元进入 failed 被看见，
+# 而不是无声地每周期刷鉴权失败日志。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/shuji/deploy/env/hermes-sidecar.env
+ExecStart=/usr/bin/python3 %h/shuji/packages/hermes-sidecar/sidecar.py
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

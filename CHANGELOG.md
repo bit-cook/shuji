@@ -2,7 +2,73 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号语义化。
 
+## [0.4.0] - 2026-11-05
+
+主题：**把控制面补上，让链路真的能跑**。新增自研 Mission-Control（SQLite 持久），
+并把上一版遗留的三个「真机上才会咬人」的缺陷修掉。
+
+### 新增：Mission-Control（控制面）
+
+此前控制面是第三方镜像 + 内存测试桩——`/list` `/status` `/tasks` `/cost` `/dispatch`
+没有持久真相，bridge 一重启数据就没了。现在仓库里有了完整的控制面：
+
+- `packages/mission-control/`：Node 仅标准库 + `node:sqlite`（需 Node 22.5+，推荐 24）
+- 端点：`GET /api/agents`、`GET /api/agents/<id>`、`GET /api/agents/<id>/tasks`、
+  `GET /api/costs/summary`、`POST /api/agents/heartbeat`、`POST /api/tasks`，
+  外加工人协议 `POST /api/tasks/<id>/claim` 与 `POST /api/tasks/<id>/complete`
+- 任务状态机 `pending → running → done|failed|cancelled`；重复 claim / 对已完成任务
+  complete 返回 409 + 当前状态，不静默成功
+- 成本计量合并两个来源：心跳 `detail.usage`（累计）与任务完成时的 `tokens`/`costUsd`，按 Agent 分组
+- **读路径心跳超时纠偏**：`MC_STALE_SEC`（默认 900）内没有新心跳的 Agent，`/list` 一律显示
+  `offline`，并附 `reportedStatus` 与 `stale: true`——否则面板会把早已死掉的 Agent
+  显示成最后一份心跳自称的 online
+- 与桥同款的红线：`MC_API_KEY` 必填（Bearer，constant-time 比较）、默认拒绑通配地址、
+  审计默认开启且**只记元数据不记请求体**（任务标题可能含机密）、每 IP 令牌桶限流、
+  请求体上限 413、裸 TCP 断链不打崩进程、`--check` / `--version` / `--help`、SIGTERM 优雅停机
+- 每 Agent 任务条数上限裁剪（`MC_TASKS_PER_AGENT`），超长任务标题截断并回带 `titleTruncated`
+
+### 修复（真机验证过的）
+
+- **心跳时间单位混用**：generic 协议的 `reportedAt` 是**秒**（`int(time.time())`），
+  控制面却拿它和 `Date.now()`（毫秒）比大小——「心跳超时纠偏」会把刚上报的 Agent
+  立刻判成离线，整条微信主线在 `/list` 里永远是 offline。现按量级换算成毫秒。
+- **Hermes 是用户级 systemd 单元，sidecar 却只在系统作用域查**：
+  `systemctl is-active hermes-gateway.service`（不带 `--user`）返回退出码 3「没有这个单元」，
+  sidecar 于是把活着的 Hermes 报成 offline。新增 `SYSTEMD_SCOPE=auto|system|user`：
+  auto 先查系统作用域，遇「无此单元」自动改查 `--user`。本机已实测：修复前 offline，修复后
+  `{"source":"systemd","scope":"user","state":"active"}`。
+- **systemd 的 `StartLimitIntervalSec` / `StartLimitBurst` 写在 `[Service]` 段**：
+  这两个键属于 `[Unit]` 段，写在 `[Service]` 里被静默忽略——「启动即失败不要无限重启」
+  这道防护一直是空转。六个单元文件全部改正，`systemd-analyze verify` 现已无警告。
+
+### 部署
+
+- 新增 `deploy/Dockerfile.mission-control`（Node 24、非 root、fetch 健康检查）、
+  `deploy/systemd/mission-control.service`、`deploy/logrotate/mission-control`、
+  `deploy/env/mission-control.env.example`
+- `deploy/systemd-user/`：一整套**用户作用域**单元（本机 Hermes 与 OpenClaw 都是用户单元，
+  枢机跟它们同规格；`%h` 展开，EnvironmentFile 直接指向仓库里的 env 文件）
+- `docker-compose.yml` 的控制面从第三方镜像改为构建本仓库代码，并加上
+  `read_only` / `cap_drop: ALL` / `no-new-privileges` / 数据卷
+- `install.sh` 增加控制面组件、Node 版本前提检查（`node:sqlite`）、
+  `MC_API_KEY` 占位值自检、`/var/lib/mission-control` 750 权限
+- `deploy/.gitignore`：`*.env` 一律忽略、`*.env.example` 例外——密钥不会因为手滑入库
+
+### 测试
+
+- 新增 `packages/mission-control`：**92** 项 `node:test`
+- bridge 77 → **80**（`/dispatch` 打到未注册 Agent 时提示「未找到 Agent」而不是暴露 404；
+  标题被控制面截断时给出提示）
+- sidecar 21 → **25**（用户级单元自动发现、显式作用域、非法作用域拒绝、缺单元名）
+- e2e 15 → **24** 项：新增 T15–T22 打**真控制面**——mission-control 与 sidecar 都以子进程
+  运行（走真实 CLI 与环境变量解析），验证 Bearer 鉴权、心跳落库、`/dispatch` 与未注册 Agent、
+  心跳超时纠偏、claim/complete 计量、**bridge 重启后 Agent 与任务都还在**、审计不含 API Key
+- CI 五个 job → **六个**：新增 `mission-control`（Node 24，含 `--check` 退出码断言），
+  e2e 升级到 Node 24 并改名 T1-T22；deploy job 增加 `docker compose config` 解析
+
 ## [0.3.0] - 2026-11-05
+
+主题：**把红线从「写了」变成「验过」**——补上生产链路上真实会咬人的缺陷，并让每条红线都有可复跑的验证。
 
 主题：**把红线从「写了」变成「验过」**——补上生产链路上真实会咬人的缺陷，并让每条红线都有可复跑的验证。
 
@@ -50,3 +116,4 @@
 - 新增环境变量全部有默认值，旧配置可直接运行；`BRIDGE_TOKEN` 未配置时行为与之前一致（无鉴权），但会打印警告。
 
 [0.3.0]: https://github.com/bit-cook/shuji/compare/v0.2.0...v0.3.0
+[0.4.0]: https://github.com/bit-cook/shuji/compare/v0.3.0...v0.4.0

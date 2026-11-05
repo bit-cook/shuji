@@ -1,0 +1,23 @@
+[Unit]
+Description=Shuji WeChat Command Bridge (wechat-bridge)
+After=network-online.target cardinal-mission-control.service
+Wants=network-online.target
+
+# 控制面没起来时命令全失败，重试无益；留 StartLimit 让它变可见失败
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/shuji/deploy/env/wechat-bridge.env
+ExecStart=/usr/bin/node %h/shuji/packages/wechat-bridge/src/cli.js
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

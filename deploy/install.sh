@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# 枢机安装脚本：把命令路由与 Sidecar 装成系统服务（最小权限账号）。
+# 枢机安装脚本：把控制面、命令路由与 Sidecar 装成系统服务（最小权限账号）。
 # 用法： sudo ./install.sh [--dest DIR] [--dry-run] [--uninstall] [--yes]
-#   默认目标：bridge=/opt/wechat-bridge  sidecar=/opt/hermes-sidecar
+#   默认目标：mission-control=/opt/mission-control
+#            wechat-bridge=/opt/wechat-bridge
+#            hermes-sidecar=/opt/hermes-sidecar
 #   环境文件需自行从 deploy/env/*.example 复制到 /etc/*.env 并 chmod 600
 #   --uninstall：停服务、删单元与落盘文件（不删系统账号，需 --yes 确认）
 set -euo pipefail
@@ -21,7 +23,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-run() { if [[ $DRY_RUN -eq 1 ]]; then echo "[dry-run] $*"; else "$@"; fi; }
+COMPONENTS=(mission-control wechat-bridge hermes-sidecar)
+
+run() { if [[ $DRY_RUN -eq 1 ]]; then echo "[dry-run] $*"; else "$@"; fi }
 confirm() {
   [[ $ASSUME_YES -eq 1 ]] && return 0
   read -r -p "$1 [y/N] " ans
@@ -31,36 +35,46 @@ confirm() {
 # ---------------- 卸载 ----------------
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "== 枢机卸载（目标：$DEST）=="
-  confirm "停止并禁用 wechat-bridge / hermes-sidecar 服务？" || { echo "已取消"; exit 0; }
-  run systemctl disable --now wechat-bridge hermes-sidecar || true
-  run rm -f /etc/systemd/system/wechat-bridge.service /etc/systemd/system/hermes-sidecar.service
+  confirm "停止并禁用 ${COMPONENTS[*]} 服务？" || { echo "已取消"; exit 0; }
+  run systemctl disable --now "${COMPONENTS[@]}" || true
+  for unit in "${COMPONENTS[@]}"; do
+    run rm -f "/etc/systemd/system/$unit.service"
+  done
   run systemctl daemon-reload
-  confirm "删除落盘文件 $DEST/wechat-bridge 与 $DEST/hermes-sidecar？" || { echo "保留文件，仅卸载服务"; exit 0; }
-  run rm -rf "$DEST/wechat-bridge" "$DEST/hermes-sidecar"
-  run rm -f /etc/logrotate.d/wechat-bridge
-  echo "已完成。系统账号 wechat-bridge / hermes-sidecar 未删除（如需：userdel）。"
-  echo "环境文件 /etc/wechat-bridge.env、/etc/hermes-sidecar.env 未删除（含密钥，请自行处置）。"
+  confirm "删除落盘文件 ${COMPONENTS[*]}？" || { echo "保留文件，仅卸载服务"; exit 0; }
+  for c in "${COMPONENTS[@]}"; do run rm -rf "$DEST/$c"; done
+  run rm -f /etc/logrotate.d/wechat-bridge /etc/logrotate.d/mission-control
+  echo "已完成。系统账号 ${COMPONENTS[*]} 未删除（如需：userdel）。"
+  echo "环境文件 /etc/{$(IFS=,; echo "${COMPONENTS[*]}")}.env 未删除（含密钥，请自行处置）。"
   exit 0
 fi
 
 echo "== 枢机安装（源：$REPO_ROOT → 目标：$DEST）=="
 
-# 1. 最小权限专用账号（红线：禁止 root 常驻）
-if ! id wechat-bridge &>/dev/null; then
-  run useradd --system --home /nonexistent --shell /usr/sbin/nologin wechat-bridge
-fi
-if ! id hermes-sidecar &>/dev/null; then
-  run useradd --system --home /nonexistent --shell /usr/sbin/nologin hermes-sidecar
+# 0. 运行前提：控制面用 node:sqlite，Node 24 才无需实验 flag
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [[ "$NODE_MAJOR" -lt 22 ]]; then
+  echo "[错误] 需要 Node 22.5+（控制面依赖 node:sqlite），当前主版本号 $NODE_MAJOR" >&2
+  exit 1
 fi
 
+# 1. 最小权限专用账号（红线：禁止 root 常驻）
+for c in "${COMPONENTS[@]}"; do
+  if ! id "$c" &>/dev/null; then
+    run useradd --system --home /nonexistent --shell /usr/sbin/nologin "$c"
+  fi
+done
+
 # 2. 落盘组件
-run mkdir -p "$DEST/wechat-bridge" "$DEST/hermes-sidecar" /var/log/wechat-bridge
+run mkdir -p "$DEST/mission-control" "$DEST/wechat-bridge" "$DEST/hermes-sidecar" \
+  /var/log/wechat-bridge /var/log/mission-control /var/lib/mission-control
+run cp -r "$REPO_ROOT/packages/mission-control/src" "$REPO_ROOT/packages/mission-control/package.json" "$DEST/mission-control/"
 run cp -r "$REPO_ROOT/packages/wechat-bridge/src" "$REPO_ROOT/packages/wechat-bridge/package.json" "$DEST/wechat-bridge/"
 run cp "$REPO_ROOT/packages/hermes-sidecar/sidecar.py" "$DEST/hermes-sidecar/"
 run chmod 644 "$DEST/hermes-sidecar/sidecar.py"
 
 # 3. systemd 单元（路径按 DEST 重写）
-for unit in wechat-bridge hermes-sidecar; do
+for unit in "${COMPONENTS[@]}"; do
   if [[ $DRY_RUN -eq 1 ]]; then
     echo "[dry-run] 生成 /etc/systemd/system/$unit.service（路径前缀 $DEST）"
   else
@@ -69,22 +83,28 @@ for unit in wechat-bridge hermes-sidecar; do
   fi
 done
 
-# 4. 日志轮转（bridge 自带大小轮转，这里按天再兜一层）
+# 4. 日志轮转（各组件自带大小轮转，这里按天再兜一层）
 if [[ $DRY_RUN -eq 1 ]]; then
-  echo "[dry-run] 安装 /etc/logrotate.d/wechat-bridge"
+  echo "[dry-run] 安装 /etc/logrotate.d/wechat-bridge 与 /etc/logrotate.d/mission-control"
 else
   cp "$REPO_ROOT/deploy/logrotate/wechat-bridge" /etc/logrotate.d/wechat-bridge
+  cp "$REPO_ROOT/deploy/logrotate/mission-control" /etc/logrotate.d/mission-control
 fi
 
-run chown -R wechat-bridge:wechat-bridge "$DEST/wechat-bridge" /var/log/wechat-bridge
-run chown -R hermes-sidecar:hermes-sidecar "$DEST/hermes-sidecar"
+for c in "${COMPONENTS[@]}"; do
+  run chown -R "$c:$c" "$DEST/$c"
+done
+run chown -R wechat-bridge:wechat-bridge /var/log/wechat-bridge
+run chown -R mission-control:mission-control /var/log/mission-control /var/lib/mission-control
+# 控制面数据目录只允许属主进入（内含 Agent 明细与任务标题）
+run chmod 750 /var/lib/mission-control
 
 # 5. 启动前自检：环境文件在位、权限正确、白名单不是模板占位值
 echo
 echo "== 启动前自检 =="
 FAIL=0
-for pair in "wechat-bridge:/etc/wechat-bridge.env" "hermes-sidecar:/etc/hermes-sidecar.env"; do
-  name="${pair%%:*}"; envfile="${pair##*:}"
+for name in "${COMPONENTS[@]}"; do
+  envfile="/etc/$name.env"
   if [[ ! -f "$envfile" ]]; then
     echo "  [缺失] $envfile —— 请从 $REPO_ROOT/deploy/env/$name.env.example 复制"
     FAIL=1
@@ -100,6 +120,10 @@ for pair in "wechat-bridge:/etc/wechat-bridge.env" "hermes-sidecar:/etc/hermes-s
     echo "  [错误] $envfile 的白名单还是模板占位值——不填好就不启动（红线：只接受本人）"
     FAIL=1
   fi
+  if [[ "$name" == "mission-control" ]] && grep -qE '^MC_API_KEY= *(替换为|TODO|$)' "$envfile"; then
+    echo "  [错误] $envfile 的 MC_API_KEY 还是占位值——控制面无鉴权等于全局可下令（红线）"
+    FAIL=1
+  fi
 done
 if [[ $FAIL -eq 1 ]]; then
   echo "自检未通过：请先补齐环境文件，再执行 systemctl enable --now。"
@@ -110,7 +134,8 @@ fi
 run systemctl daemon-reload
 echo
 echo "接下来："
-echo "  1. 如自检有缺失：cp $REPO_ROOT/deploy/env/wechat-bridge.env.example /etc/wechat-bridge.env && chmod 600 /etc/wechat-bridge.env"
-echo "  2. systemctl enable --now wechat-bridge hermes-sidecar"
-echo "  3. journalctl -u wechat-bridge -u hermes-sidecar -f"
-echo "  4. 校验监听未暴露公网：ss -tlnp | grep -E '8080|3000'"
+echo "  1. 如自检有缺失：cp $REPO_ROOT/deploy/env/<组件>.env.example /etc/<组件>.env && chmod 600 /etc/<组件>.env"
+echo "  2. systemctl enable --now mission-control            # 先起控制面"
+echo "  3. systemctl enable --now wechat-bridge hermes-sidecar"
+echo "  4. journalctl -u mission-control -u wechat-bridge -u hermes-sidecar -f"
+echo "  5. 校验监听未暴露公网：ss -tlnp | grep -E '3000|8080'"

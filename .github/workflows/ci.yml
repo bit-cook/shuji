@@ -44,6 +44,29 @@ jobs:
           MC_BASE=http://127.0.0.1:3000 MC_API_KEY=k \
             python3 packages/hermes-sidecar/sidecar.py --dry-run --once
 
+  # 控制面依赖 node:sqlite：Node 24 起无需实验 flag
+  mission-control:
+    name: mission-control (node:test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: node --check 全部源码
+        run: |
+          for f in $(git ls-files 'packages/mission-control/src/**/*.js'); do
+            node --check "$f" || exit 1
+          done
+      - name: CLI --version / --help / --check
+        run: |
+          node packages/mission-control/src/cli.js --version
+          node packages/mission-control/src/cli.js --help
+          node packages/mission-control/src/cli.js --check; test $? -eq 2   # 无 MC_API_KEY 必须拒绝
+          MC_API_KEY=$(printf 'k%.0s' $(seq 32)) MC_DB=/tmp/mc-ci.db \
+            node packages/mission-control/src/cli.js --check
+      - run: node --test packages/mission-control/test/*.test.js
+
   plugin:
     name: openclaw-plugin (tsc + node:test)
     runs-on: ubuntu-latest
@@ -80,16 +103,24 @@ jobs:
           else
             echo "systemd-analyze 不可用，跳过"
           fi
+      - name: docker-compose 配置可解析
+        run: |
+          if command -v docker >/dev/null; then
+            docker compose -f deploy/docker-compose.yml config >/dev/null \
+              || echo "::warning::compose config 需要构建上下文/密钥，跳过"
+          else
+            echo "docker 不可用，跳过"
+          fi
 
   e2e:
-    name: 端到端验收 T1-T14
+    name: 端到端验收 T1-T22
     runs-on: ubuntu-latest
-    needs: [bridge, sidecar, plugin]
+    needs: [bridge, sidecar, plugin, mission-control]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

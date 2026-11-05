@@ -3,6 +3,10 @@ Description=Shuji Hermes Heartbeat Sidecar
 After=network-online.target
 Wants=network-online.target
 
+# 鉴权失败（退出码 4）时快速进入 failed 状态被看见，而不是无声每周期重试
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
@@ -10,9 +14,6 @@ EnvironmentFile=/etc/hermes-sidecar.env
 ExecStart=/usr/bin/python3 /opt/hermes-sidecar/sidecar.py
 Restart=on-failure
 RestartSec=10
-# 鉴权失败（退出码 4）时快速进入 failed 状态被看见，而不是无声每周期重试
-StartLimitIntervalSec=300
-StartLimitBurst=5
 TimeoutStopSec=20
 # 最小权限（红线：禁止 root 常驻）
 User=hermes-sidecar

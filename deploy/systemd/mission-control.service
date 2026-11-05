@@ -1,0 +1,29 @@
+[Unit]
+Description=Shuji Mission Control (Agent 控制面)
+After=network-online.target
+Wants=network-online.target
+
+# 启动即失败（如绑定被拒 / node:sqlite 不可用）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/mission-control.env
+ExecStart=/usr/bin/node /opt/mission-control/src/cli.js
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+# 最小权限（红线：禁止 root 常驻）
+User=mission-control
+Group=mission-control
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mission-control /var/log/mission-control
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

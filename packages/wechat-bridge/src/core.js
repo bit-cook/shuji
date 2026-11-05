@@ -132,8 +132,23 @@ function createRouter({
         const title = parts.slice(2).join(' ');
         if (!id || !title) return '用法：/dispatch <agentId> <任务内容>';
         const task = { agentId: id, title, createdAt: now() };
-        const r = await mc.post('/api/tasks', task);
-        return '已下发：' + JSON.stringify(r);
+        let r;
+        try {
+          r = await mc.post('/api/tasks', task);
+        } catch (e) {
+          // 控制面会对未注册 Agent 回 404：这是打字错误，不该显示成「管理面返回 404」
+          if (e && e.status === 404) {
+            const err = new Error('未找到 Agent：' + id);
+            err.status = 404;
+            throw err;
+          }
+          throw e;
+        }
+        const lines = ['已下发：' + JSON.stringify(r)];
+        if (r && r.titleTruncated) {
+          lines.push('（任务内容超长，控制面已按上限截断）');
+        }
+        return lines.join('\n');
       }
       default:
         return '未知命令。' + USAGE;

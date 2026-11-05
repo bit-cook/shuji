@@ -8,7 +8,7 @@
 
 状态来源（按序）：
   1. Hermes RPC（HERMES_RPC，默认 http://127.0.0.1:8765/status）
-  2. 退化：systemctl is-active <SYSTEMD_UNIT>
+  2. 退化：systemctl is-active <SYSTEMD_UNIT>（自动识别 system / --user 作用域）
   3. 两者皆不可用 → offline
 
 特性：
@@ -44,6 +44,7 @@ DEFAULTS = {
     "HERMES_RPC": "http://127.0.0.1:8765/status",
     "INTERVAL": "300",
     "SYSTEMD_UNIT": "agent-gateway",
+    "SYSTEMD_SCOPE": "auto",
     "RETRY_MAX": "3",
     "RETRY_BACKOFF": "2",
     "REQUEST_TIMEOUT": "10",
@@ -53,6 +54,10 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_CONFIG = 2
 EXIT_AUTH = 4
+
+# systemctl is-active 的退出码：0=active，3=没有这个单元，其余=已知但未运行
+SYSTEMCTL_NO_SUCH_UNIT = 3
+SCOPES = ("auto", "system", "user")
 
 
 class Config:
@@ -64,6 +69,10 @@ class Config:
         self.hermes_rpc = env.get("HERMES_RPC", DEFAULTS["HERMES_RPC"])
         self.interval = int(env.get("INTERVAL", DEFAULTS["INTERVAL"]))
         self.systemd_unit = env.get("SYSTEMD_UNIT", DEFAULTS["SYSTEMD_UNIT"])
+        scope = str(env.get("SYSTEMD_SCOPE", DEFAULTS["SYSTEMD_SCOPE"])).strip().lower() or "auto"
+        if scope not in SCOPES:
+            raise ValueError(f"SYSTEMD_SCOPE 只能是 {'/'.join(SCOPES)}，当前为 {scope}")
+        self.systemd_scope = scope
         self.retry_max = int(env.get("RETRY_MAX", DEFAULTS["RETRY_MAX"]))
         self.retry_backoff = float(env.get("RETRY_BACKOFF", DEFAULTS["RETRY_BACKOFF"]))
         self.request_timeout = float(env.get("REQUEST_TIMEOUT", DEFAULTS["REQUEST_TIMEOUT"]))
@@ -81,10 +90,51 @@ class Config:
             "hermes_rpc": self.hermes_rpc,
             "interval": self.interval,
             "systemd_unit": self.systemd_unit,
+            "systemd_scope": self.systemd_scope,
         }
 
 
-def fetch_status(cfg: Config, urlopen=urllib.request.urlopen) -> tuple[str, dict]:
+def _systemctl(unit, scope, timeout):
+    """跑一次 systemctl is-active。返回 (returncode, stdout)。"""
+    cmd = ["systemctl"]
+    if scope == "user":
+        cmd.append("--user")
+    cmd += ["is-active", unit]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return out.returncode, (out.stdout or "").strip()
+
+
+def probe_systemd(cfg, run=None) -> tuple[str, dict]:
+    """查 systemd 单元状态，自动识别 system / --user 作用域。
+
+    实测踩过的坑：Hermes 网关是 **用户级** 单元（~/.config/systemd/user/）。
+    在 root 下不带 --user 查 `systemctl is-active hermes-gateway.service`
+    会得到退出码 3（没有这个单元），sidecar 于是把活着的 Hermes 报成 offline。
+    """
+    run = run or _systemctl
+    unit = cfg.systemd_unit
+    if not unit:
+        return "offline", {"source": "none", "error": "SYSTEMD_UNIT 未配置"}
+    scopes = [cfg.systemd_scope] if cfg.systemd_scope != "auto" else ["system", "user"]
+    for scope in scopes:
+        try:
+            code, state = run(unit, scope, cfg.request_timeout)
+        except Exception as e:  # noqa: BLE001 - systemctl 不存在/超时都算查不到
+            log.debug("systemctl(%s) 查询失败：%s", scope, e)
+            continue
+        detail = {"source": "systemd", "unit": unit, "scope": scope, "state": state or "unknown"}
+        if code == 0:
+            return "online", detail
+        # 只有 auto 模式、且 system 作用域明确说「没有这个单元」时，才继续试 user 作用域
+        retry_user = (
+            cfg.systemd_scope == "auto" and scope == "system" and code == SYSTEMCTL_NO_SUCH_UNIT
+        )
+        if not retry_user:
+            return "offline", detail
+    return "offline", {"source": "none", "unit": unit, "error": "systemd 不可用"}
+
+
+def fetch_status(cfg: Config, urlopen=urllib.request.urlopen, run=None) -> tuple[str, dict]:
     """返回 (status, detail)。RPC 优先，systemd 兜底。"""
     try:
         with urlopen(cfg.hermes_rpc, timeout=cfg.request_timeout) as resp:
@@ -92,18 +142,7 @@ def fetch_status(cfg: Config, urlopen=urllib.request.urlopen) -> tuple[str, dict
         return "online", {"source": "hermes-rpc", "detail": data}
     except Exception as e:  # noqa: BLE001 - 任何 RPC 失败都退化
         log.debug("hermes rpc 不可用：%s", e)
-    try:
-        out = subprocess.run(
-            ["systemctl", "is-active", cfg.systemd_unit],
-            capture_output=True, text=True, timeout=cfg.request_timeout,
-        )
-        state = out.stdout.strip()
-        if state == "active":
-            return "online", {"source": "systemd", "unit": cfg.systemd_unit}
-        return "offline", {"source": "systemd", "unit": cfg.systemd_unit, "state": state}
-    except Exception as e:  # noqa: BLE001
-        log.debug("systemd 查询失败：%s", e)
-        return "offline", {"source": "none", "error": str(e)}
+    return probe_systemd(cfg, run=run)
 
 
 def build_payload(cfg: Config, status: str, detail: dict) -> dict:

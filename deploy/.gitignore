@@ -1,0 +1,6 @@
+# 环境变量文件含密钥，禁止入库
+.env
+*.env
+!*.env.example
+mission-control.db
+mission-control.db-*

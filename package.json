@@ -1,14 +1,17 @@
 {
   "name": "shuji",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "枢机 · Cardinal — Agent OS 控制面实现：命令路由（微信经 OpenClaw / Telegram 原生）、Hermes 心跳 Sidecar、部署清单",
+  "description": "枢机 · Cardinal — Agent OS 控制面实现：Mission-Control（SQLite）、命令路由（微信经 OpenClaw / Telegram 原生）、Hermes 心跳 Sidecar、部署清单",
   "license": "MIT",
   "scripts": {
     "test:bridge": "node --test packages/wechat-bridge/test/*.test.js",
+    "test:mc": "node --test packages/mission-control/test/*.test.js",
     "test:sidecar": "python3 -m unittest discover -s packages/hermes-sidecar/tests",
     "test:plugin": "cd packages/openclaw-cardinal-plugin && npm test",
     "test:e2e": "node test/e2e.js",
-    "test": "npm run test:bridge && npm run test:sidecar && npm run test:plugin && npm run test:e2e"
+    "test": "npm run test:bridge && npm run test:mc && npm run test:sidecar && npm run test:plugin && npm run test:e2e",
+    "start:mc": "node packages/mission-control/src/cli.js",
+    "check:mc": "node packages/mission-control/src/cli.js --check"
   }
 }

@@ -1,0 +1,23 @@
+[Unit]
+Description=Shuji Mission Control (Agent 控制面)
+After=network-online.target
+Wants=network-online.target
+
+# 启动即失败（如绑定被拒 / node:sqlite 不可用）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/shuji/deploy/env/mission-control.env
+ExecStart=/usr/bin/node %h/shuji/packages/mission-control/src/cli.js
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# 控制面。Node 24：node:sqlite 在该版本无需实验 flag。
+FROM node:24-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY packages/mission-control/package.json ./packages/mission-control/package.json
+COPY packages/mission-control/src ./packages/mission-control/src
+# 非 root 运行（红线：禁止 root 常驻）；node 镜像自带 node 用户
+USER node
+EXPOSE 3000
+# 健康检查不依赖 curl/wget：用 Node 自己的 fetch 打 /healthz（免鉴权）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.MC_PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["node", "packages/mission-control/src/cli.js"]
+CMD []

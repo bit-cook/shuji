@@ -105,6 +105,46 @@ class TestFetchStatus(unittest.TestCase):
         self.assertEqual(status, "offline")
         self.assertEqual(detail["source"], "none")
 
+    def test_user_unit_auto_discovery(self):
+        """Hermes 网关是用户级单元：system 作用域报「没有这个单元」时改查 --user。"""
+        calls = []
+
+        def run(unit, scope, timeout):
+            calls.append((unit, scope))
+            if scope == "user":
+                return 0, "active"
+            return 3, "inactive"
+
+        c = cfg(HERMES_RPC="http://127.0.0.1:1/status", SYSTEMD_UNIT="hermes-gateway.service")
+        status, detail = sidecar.fetch_status(c, run=run)
+        self.assertEqual(status, "online")
+        self.assertEqual(detail["source"], "systemd")
+        self.assertEqual(detail["scope"], "user")
+        self.assertEqual(calls, [("hermes-gateway.service", "system"), ("hermes-gateway.service", "user")])
+
+    def test_explicit_scope_skips_auto(self):
+        calls = []
+
+        def run(unit, scope, timeout):
+            calls.append(scope)
+            return 0, "active"
+
+        c = cfg(HERMES_RPC="http://127.0.0.1:1/status", SYSTEMD_SCOPE="user")
+        status, detail = sidecar.fetch_status(c, run=run)
+        self.assertEqual(status, "online")
+        self.assertEqual(calls, ["user"])
+        self.assertEqual(detail["scope"], "user")
+
+    def test_bad_scope_rejected(self):
+        with self.assertRaisesRegex(ValueError, "SYSTEMD_SCOPE"):
+            cfg(SYSTEMD_SCOPE="global")
+
+    def test_missing_unit_reports_offline_without_crashing(self):
+        c = cfg(HERMES_RPC="http://127.0.0.1:1/status", SYSTEMD_UNIT="")
+        status, detail = sidecar.fetch_status(c, run=lambda *a: (_ for _ in ()).throw(OSError("x")))
+        self.assertEqual(status, "offline")
+        self.assertEqual(detail["source"], "none")
+
 
 class TestHeartbeat(unittest.TestCase):
     def test_payload_and_auth_header(self):

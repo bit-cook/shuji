@@ -8,13 +8,18 @@
  *
  * 覆盖：链路 / 安全（白名单、端点鉴权、确认令牌）/ 状态 / 告警 / 恢复 /
  *       计量 / 调度 / 韧性 / Telegram / 审计留痕 / 企业微信备份链路。
+ *
+ * T15–T22 另起一节打**真控制面**：mission-control 与 sidecar 都以子进程运行
+ * （走真实 CLI 与环境变量解析），bridge 指向真 SQLite。验证 mock 测不到的两件事：
+ *   1. 持久化：bridge 重启后 Agent / 任务 / 成本还在
+ *   2. 心跳超时纠偏：断心跳的 Agent 在 /list 显示 offline
  */
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const pexec = promisify(execFile);
 
@@ -23,11 +28,14 @@ const { createMockTelegram } = require('./mock-telegram');
 const { createBridgeFromEnv, listen } = require('../packages/wechat-bridge/src/index');
 const { createHttpAdapter } = require('../packages/wechat-bridge/src/adapters/http');
 const { createRouter } = require('../packages/wechat-bridge/src/core');
+const { createMissionControl } = require('../packages/mission-control/src/index');
 const w = require('../packages/wechat-bridge/src/adapters/wecom');
 
 const SIDECAR = path.join(__dirname, '..', 'packages', 'hermes-sidecar', 'sidecar.py');
+const MC_CLI = path.join(__dirname, '..', 'packages', 'mission-control', 'src', 'cli.js');
 const ALLOW = 'me';
 const BRIDGE_TOKEN = 'e2e-bridge-token';
+const MC_KEY = 'e2e-mc-key-0123456789abcdef';
 
 let passed = 0, failed = 0;
 function report(id, name, ok, detail) {
@@ -282,10 +290,170 @@ async function main() {
     fs.rmSync(path.dirname(auditFile), { recursive: true, force: true });
   }
 
+  await realControlPlaneSection();
+
   console.log(`\n结果：${passed} 通过 / ${failed} 失败（共 ${passed + failed} 项）`);
-  console.log('说明：本验收用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器 /openclaw，带 Bearer）；');
-  console.log('      Telegram 走长轮询适配器；企业微信备份链路由 T14 覆盖。均无需真实凭证。');
+  console.log('说明：T1–T14 用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器 /openclaw，带 Bearer）；');
+  console.log('      Telegram 走长轮询适配器；企业微信备份链路由 T14 覆盖。');
+  console.log('      T15–T20 打的是**真控制面**（真 SQLite + 真 sidecar 子进程 + 真 bridge 进程），验证持久化与心跳纠偏。');
   process.exit(failed === 0 ? 0 : 1);
+}
+
+/**
+ * T15–T22：真控制面验收。
+ * 这里不再用 mock——mission-control 以**子进程**启动（走真实 CLI 与环境变量解析），
+ * sidecar 也以子进程跑，bridge 用同一份 MC_BASE/MC_API_KEY。
+ * 重点验证 mock 测不到的两件事：
+ *   1. 持久化：bridge 重启后 Agent / 任务 / 成本还在（SQLite，不是内存）
+ *   2. 心跳超时纠偏：断心跳的 Agent 在 /list 里显示 offline，而不是最后一份心跳自称的 online
+ */
+async function realControlPlaneSection() {
+  console.log('\n---- T15–T22 真控制面（SQLite + 子进程）----');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shuji-e2e-mc-'));
+  const dbFile = path.join(tmp, 'mc.db');
+  const auditFile = path.join(tmp, 'mc-audit.jsonl');
+  const MC_BASE = 'http://127.0.0.1:3199';
+
+  const mc = spawn(process.execPath, [MC_CLI], {
+    env: {
+      ...process.env,
+      MC_HOST: '127.0.0.1', MC_PORT: '3199', MC_API_KEY: MC_KEY,
+      MC_DB: dbFile, MC_AUDIT_LOG: auditFile,
+      MC_STALE_SEC: '2',            // 故意设短，便于验证纠偏
+      MC_TASKS_PER_AGENT: '100',
+      LOG_LEVEL: 'error',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let mcOut = '';
+  mc.stdout.on('data', (d) => { mcOut += d; });
+  mc.stderr.on('data', (d) => { mcOut += d; });
+
+  const bridgeEnv = {
+    ...process.env,
+    MC_BASE, MC_API_KEY: MC_KEY,
+    WECHAT_ALLOW_FROM: ALLOW,
+    ADAPTER: 'http', HOST: '127.0.0.1', PORT: '0',
+    AUDIT_LOG: path.join(tmp, 'bridge-audit.jsonl'), BRIDGE_TOKEN,
+  };
+
+  const sidecarEnv = {
+    ...process.env,
+    MC_BASE, MC_API_KEY: MC_KEY,
+    AGENT_ID: 'hermes-node-b',
+    HERMES_RPC: 'http://127.0.0.1:1/status',   // 必然连不上 → 退化查 systemd
+    SYSTEMD_UNIT: 'hermes-gateway.service',
+    SYSTEMD_SCOPE: 'user',
+    INTERVAL: '1',
+  };
+
+  try {
+    await waitFor(MC_BASE + '/healthz', 8000);
+    report('T15', '真控制面：CLI 启动 + /healthz 免鉴权 + 无令牌 401',
+      true, 'listening');
+
+    const noTok = await fetch(MC_BASE + '/api/agents');
+    const badTok = await fetch(MC_BASE + '/api/agents', { headers: { Authorization: 'Bearer nope' } });
+    const goodTok = await fetch(MC_BASE + '/api/agents', { headers: { Authorization: 'Bearer ' + MC_KEY } });
+    report('T15b', '真控制面：Bearer 鉴权（无令牌/错令牌 401，正确 200）',
+      noTok.status === 401 && badTok.status === 401 && goodTok.status === 200,
+      `noTok=${noTok.status} badTok=${badTok.status} good=${goodTok.status}`);
+
+    // 真 sidecar 子进程：心跳一次后退出
+    const sidecar = spawn('python3', [SIDECAR, '--once'], { env: sidecarEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    let scOut = '';
+    sidecar.stdout.on('data', (d) => { scOut += d; });
+    sidecar.stderr.on('data', (d) => { scOut += d; });
+    const scCode = await new Promise((r) => sidecar.on('exit', r));
+    const hbOk = scCode === 0 && scOut.includes('"ok": true');
+
+    const { router, server } = createBridgeFromEnv(bridgeEnv);
+    await new Promise((r) => server.once('listening', r));
+    const BRIDGE = `http://127.0.0.1:${server.address().port}`;
+
+    const list = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/list' });
+    report('T16', '真 sidecar 心跳 → 真控制面 → 桥 /list 显示在线',
+      hbOk && /hermes-node-b \[online\]/.test(list), `sidecar exit=${scCode} ${list.split('\n')[0]}`);
+
+    const status = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/status hermes-node-b' });
+    report('T17', '真控制面：/status 详情含来源与单元信息',
+      /"status": "online"/.test(status) && /hermes-gateway.service/.test(status),
+      status.replace(/\s+/g, ' ').slice(0, 160));
+
+    const dispatch = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch hermes-node-b 夜间巡检一次' });
+    const token = (dispatch.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
+    const confirmed = token ? await postJson(BRIDGE + '/message', { from: ALLOW, text: '/confirm ' + token }) : '';
+    const ghost = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/dispatch ghost x' });
+    const ghostTok = (ghost.match(/\/confirm ([0-9A-F]{8})/) || [])[1];
+    const ghostReply = ghostTok ? await postJson(BRIDGE + '/message', { from: ALLOW, text: '/confirm ' + ghostTok }) : '';
+    report('T18', '真控制面：/dispatch 落库；未注册 Agent 提示「未找到」',
+      /已下发/.test(confirmed) && /未找到 Agent：ghost/.test(ghostReply),
+      `dispatch=${/已下发/.test(confirmed)} ghost=${ghostReply.split('\n')[0]}`);
+
+    // 心跳超时纠偏：MC_STALE_SEC=2，停掉心跳后 /list 应转 offline
+    await new Promise((r) => setTimeout(r, 2600));
+    const staleList = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/list' });
+    report('T19', '心跳超时纠偏：断心跳后 /list 报 offline（而非最后自称的 online）',
+      /hermes-node-b \[offline\]/.test(staleList), staleList.split('\n')[0]);
+
+    // 工人取任务并回报 → /cost 反映用量
+    const tasksRaw = await (await fetch(MC_BASE + '/api/agents/hermes-node-b/tasks', {
+      headers: { Authorization: 'Bearer ' + MC_KEY },
+    })).json();
+    const taskId = (tasksRaw.find((t) => t.status === 'pending') || {}).id;
+    const claimed = await fetch(`${MC_BASE}/api/tasks/${taskId}/claim`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + MC_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claimedBy: 'e2e-worker' }),
+    });
+    const done = await fetch(`${MC_BASE}/api/tasks/${taskId}/complete`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + MC_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'done', tokens: 4242, costUsd: 0.42, result: 'ok' }),
+    });
+    const cost = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/cost' });
+    const costObj = JSON.parse(cost);
+    report('T20', '真控制面：claim/complete 后 /cost 计入用量',
+      claimed.status === 200 && done.status === 200 && costObj.totalTokens === 4242,
+      `claim=${claimed.status} done=${done.status} totalTokens=${costObj.totalTokens}`);
+
+    // 持久化：bridge 重启后数据仍在（mock 版这一项其实没测到真持久化）
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+    const { router: r2, server: s2 } = createBridgeFromEnv(bridgeEnv);
+    await new Promise((r) => s2.once('listening', r));
+    const BRIDGE2 = `http://127.0.0.1:${s2.address().port}`;
+    const list2 = await postJson(BRIDGE2 + '/message', { from: ALLOW, text: '/list' });
+    const tasks2 = await postJson(BRIDGE2 + '/message', { from: ALLOW, text: '/tasks hermes-node-b' });
+    report('T21', '持久化：bridge 重启后 Agent 与任务都还在（真 SQLite）',
+      /hermes-node-b \[offline\]/.test(list2) && /夜间巡检一次/.test(tasks2),
+      `agent=${/hermes-node-b/.test(list2)} task=${/夜间巡检一次/.test(tasks2)}`);
+    s2.closeAllConnections();
+    await new Promise((r) => s2.close(r));
+
+    // 审计落库且不含密钥
+    const auditOk = fs.existsSync(auditFile) && !fs.readFileSync(auditFile, 'utf8').includes(MC_KEY);
+    report('T22', '真控制面：审计留痕且不含 API Key',
+      auditOk, auditFile);
+  } finally {
+    mc.kill('SIGTERM');
+    await new Promise((r) => setTimeout(r, 300));
+    try { mc.kill('SIGKILL'); } catch { /* 已退出 */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  }
+}
+
+function waitFor(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return (async function attempt() {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch { /* 还没起来 */ }
+    if (Date.now() > deadline) throw new Error('等待 ' + url + ' 超时');
+    await new Promise((r) => setTimeout(r, 100));
+    return attempt();
+  }());
 }
 
 main().catch((e) => { console.error('e2e 崩溃：', e); process.exit(1); });

@@ -1,0 +1,17 @@
+{
+  "name": "@cardinal/mission-control",
+  "version": "0.4.0",
+  "private": true,
+  "description": "枢机 · Cardinal — 控制面：Agent 注册/心跳、任务下发与回收、Token 成本计量（Node 仅标准库 + node:sqlite）",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node src/cli.js",
+    "check": "node src/cli.js --check"
+  }
+}

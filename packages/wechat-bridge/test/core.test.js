@@ -122,6 +122,37 @@ test('管理面报错时转成可读文案且不崩溃', async () => {
   assert.equal(auditLog.at(-1).result, 'error');
 });
 
+test('/dispatch 打到未注册 Agent 时提示未找到，而不是暴露 404', async () => {
+  const err = Object.assign(new Error('管理面返回 404'), { status: 404 });
+  const mc = { ...fakeMc(), async post() { throw err; } };
+  const { router, auditLog } = makeRouter(mc);
+  const pending = await router.handle('/dispatch ghost 跑一次', 'me');
+  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const r = await router.handle(`/confirm ${token}`, 'me');
+  assert.match(r, /未找到 Agent：ghost/);
+  assert.equal(auditLog.at(-1).result, 'error');
+});
+
+test('/dispatch 成功后提示标题被控制面截断', async () => {
+  const mc = { ...fakeMc(), async post() { return { ok: true, task: { id: 't-1' }, titleTruncated: true }; } };
+  const { router } = makeRouter(mc);
+  const pending = await router.handle('/dispatch node-a ' + 'x'.repeat(20), 'me');
+  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const r = await router.handle(`/confirm ${token}`, 'me');
+  assert.match(r, /已下发/);
+  assert.match(r, /已按上限截断/);
+});
+
+test('/dispatch 其他错误仍原样透出', async () => {
+  const err = Object.assign(new Error('管理面返回 500'), { status: 500 });
+  const mc = { ...fakeMc(), async post() { throw err; } };
+  const { router } = makeRouter(mc);
+  const pending = await router.handle('/dispatch node-a x', 'me');
+  const token = pending.match(/\/confirm ([0-9A-F]{8})/)[1];
+  const r = await router.handle(`/confirm ${token}`, 'me');
+  assert.match(r, /处理失败：管理面返回 500/);
+});
+
 test('未知命令返回用法', async () => {
   const { router } = makeRouter(fakeMc());
   const r = await router.handle('/nope', 'me');

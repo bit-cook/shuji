@@ -1,13 +1,27 @@
 services:
-  # 控制面（第三方，MIT）。只绑 Tailscale 网卡地址，不暴露公网。
+  # 控制面（枢机自研，MIT）。只绑 Tailscale 网卡地址，不暴露公网。
+  # Node 24：node:sqlite 在该版本无需实验 flag。
   mission-control:
-    image: ghcr.io/builderz-labs/mission-control:latest
-    env_file: .env                      # deploy/.env：MC_API_KEY 等
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.mission-control
+    env_file: ./env/mission-control.env   # 由 deploy/env/mission-control.env.example 复制而来
+    environment:
+      MC_HOST: 0.0.0.0                    # 容器内通配绑定；对外仍只发布到回环/Tailscale
+      ALLOW_PUBLIC_BIND: "1"              # 容器网络由上面的 ports 决定，非公网暴露
+      MC_DB: /var/lib/mission-control/mission-control.db
+      MC_AUDIT_LOG: /var/log/mission-control/audit.jsonl
+      MC_API_KEY: ${MC_API_KEY:?需要在 deploy/env/mission-control.env 里配置 MC_API_KEY}
     ports:
       - "${MC_TAILSCALE_IP:-127.0.0.1}:3000:3000"
     volumes:
-      - ./data:/data
+      - mc-data:/var/lib/mission-control
+      - mc-logs:/var/log/mission-control
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
 
   # 命令路由 · OpenClaw 插件入口（枢机自研）。OpenClaw 主机上的
   # cardinal-bridge 插件把微信（ClawBot）消息 POST 到本服务的 /openclaw。
@@ -61,3 +75,5 @@ services:
 volumes:
   bridge-logs:
   bridge-logs-telegram:
+  mc-data:
+  mc-logs:
