@@ -1,11 +1,15 @@
 {
   "name": "wechat-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "枢机 · Cardinal — 命令路由：微信 → Mission-Control 控制面（白名单 / 六条命令 / 危险命令二次确认 / 审计）",
   "license": "MIT",
   "main": "src/index.js",
-  "bin": { "wechat-bridge": "src/cli.js" },
-  "engines": { "node": ">=18" },
+  "bin": {
+    "wechat-bridge": "src/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "test": "node --test test/*.test.js"
   }

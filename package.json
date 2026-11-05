@@ -1,6 +1,6 @@
 {
   "name": "shuji",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "枢机 · Cardinal — Agent OS 控制面实现：命令路由（微信经 OpenClaw / Telegram 原生）、Hermes 心跳 Sidecar、部署清单",
   "license": "MIT",

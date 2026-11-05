@@ -11,7 +11,14 @@
   2. 退化：systemctl is-active <SYSTEMD_UNIT>
   3. 两者皆不可用 → offline
 
-特性：失败重试退避、SIGTERM 优雅退出、JSON 结构化日志（journald 友好）、--once 单次模式（供测试/验收）。
+特性：
+  - 失败指数退避（带抖动）；401/403 快速失败并以退出码 4 结束——密钥错误重试无益，
+    配合 systemd StartLimit 让单元进入 failed 状态被看见，而不是无声刷日志
+  - SIGTERM 优雅退出（分片 sleep，信号即时响应）
+  - JSON 结构化日志（journald 友好）
+  - --once 单次模式（供测试/验收）、--dry-run 只打印报文不发送、--interval 覆盖周期
+
+退出码：0 正常 / 1 心跳失败（--once）/ 2 配置错误 / 4 鉴权失败（密钥问题）
 """
 from __future__ import annotations
 
@@ -19,12 +26,16 @@ import argparse
 import json
 import logging
 import os
+import platform
+import random
 import signal
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+__version__ = "0.3.0"
 
 log = logging.getLogger("hermes-sidecar")
 
@@ -37,6 +48,11 @@ DEFAULTS = {
     "RETRY_BACKOFF": "2",
     "REQUEST_TIMEOUT": "10",
 }
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_CONFIG = 2
+EXIT_AUTH = 4
 
 
 class Config:
@@ -55,6 +71,8 @@ class Config:
             raise ValueError("MC_BASE 未配置（管理面地址，红线：仅内网可达）")
         if not self.mc_api_key:
             raise ValueError("MC_API_KEY 未配置（管理面 API Key）")
+        if self.interval < 1:
+            raise ValueError("INTERVAL 至少 1 秒")
 
     def as_dict(self):
         return {
@@ -88,23 +106,39 @@ def fetch_status(cfg: Config, urlopen=urllib.request.urlopen) -> tuple[str, dict
         return "offline", {"source": "none", "error": str(e)}
 
 
-def post_heartbeat(cfg: Config, status: str, detail: dict, urlopen=urllib.request.urlopen) -> dict:
-    body = json.dumps({
+def build_payload(cfg: Config, status: str, detail: dict) -> dict:
+    """generic 协议心跳报文。detail 里带上回报方信息，面板可溯源。"""
+    return {
         "framework": "generic",
         "action": "heartbeat",
         "payload": {
             "agentId": cfg.agent_id,
             "status": status,
             "reportedAt": int(time.time()),
-            "detail": detail,
+            "detail": {
+                **detail,
+                "reportedBy": f"hermes-sidecar/{__version__}",
+                "pid": os.getpid(),
+            },
         },
-    }).encode("utf-8")
+    }
+
+
+def post_heartbeat(
+    cfg: Config, status: str, detail: dict, urlopen=urllib.request.urlopen, dry_run: bool = False
+) -> dict:
+    body = json.dumps(build_payload(cfg, status, detail)).encode("utf-8")
+    if dry_run:
+        log.info(json.dumps({"event": "dry-run", "payload": build_payload(cfg, status, detail)},
+                            ensure_ascii=False))
+        return {"ok": True, "dryRun": True}
     req = urllib.request.Request(
         cfg.mc_base + "/api/agents/heartbeat",
         data=body,
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer " + cfg.mc_api_key,
+            "User-Agent": f"hermes-sidecar/{__version__} ({platform.system()})",
         },
         method="POST",
     )
@@ -112,18 +146,30 @@ def post_heartbeat(cfg: Config, status: str, detail: dict, urlopen=urllib.reques
         return json.loads(resp.read().decode("utf-8"))
 
 
-def run_once(cfg: Config, urlopen=urllib.request.urlopen, sleep=time.sleep) -> bool:
-    """单次心跳；带指数退避重试。成功返回 True。"""
+def run_once(
+    cfg: Config,
+    urlopen=urllib.request.urlopen,
+    sleep=time.sleep,
+    dry_run: bool = False,
+    report=None,
+) -> bool:
+    """单次心跳；带指数退避（含抖动）重试。成功返回 True。
+
+    report(dict) 可选回调，上报每次尝试的结果；main() 据此区分
+    「鉴权失败（该退出）」与「瞬时失败（该继续）」。
+    """
     status, detail = fetch_status(cfg, urlopen=urlopen)
     attempt = 0
     while True:
         attempt += 1
         try:
-            r = post_heartbeat(cfg, status, detail, urlopen=urlopen)
+            r = post_heartbeat(cfg, status, detail, urlopen=urlopen, dry_run=dry_run)
             log.info(json.dumps({
                 "event": "heartbeat", "agentId": cfg.agent_id, "status": status,
                 "attempt": attempt, "ok": True, "response": r,
             }, ensure_ascii=False))
+            if report:
+                report({"ok": True, "attempt": attempt, "status": status})
             return True
         except urllib.error.HTTPError as e:
             with e:  # 读干并关闭响应体，避免 ResourceWarning
@@ -132,6 +178,8 @@ def run_once(cfg: Config, urlopen=urllib.request.urlopen, sleep=time.sleep) -> b
                 "event": "heartbeat", "agentId": cfg.agent_id, "status": status,
                 "attempt": attempt, "ok": False, "http": e.code, "body": body,
             }, ensure_ascii=False))
+            if report:
+                report({"ok": False, "attempt": attempt, "status": status, "http": e.code})
             # 401/403 是配置问题，重试无益，快速失败
             if e.code in (401, 403):
                 return False
@@ -140,9 +188,13 @@ def run_once(cfg: Config, urlopen=urllib.request.urlopen, sleep=time.sleep) -> b
                 "event": "heartbeat", "agentId": cfg.agent_id, "status": status,
                 "attempt": attempt, "ok": False, "error": str(e),
             }, ensure_ascii=False))
+            if report:
+                report({"ok": False, "attempt": attempt, "status": status, "error": str(e)})
         if attempt >= cfg.retry_max:
             return False
-        sleep(cfg.retry_backoff * attempt)
+        # 指数退避 + ±25% 抖动，避免多节点同时重试打管理面
+        base = cfg.retry_backoff * attempt
+        sleep(base * (0.75 + random.random() * 0.5))
 
 
 _stop = False
@@ -157,8 +209,15 @@ def _handle_term(signum, frame):  # noqa: ANN001
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Hermes -> Mission-Control 心跳 Sidecar")
     parser.add_argument("--once", action="store_true", help="只跑一次心跳后退出（测试/验收用）")
+    parser.add_argument("--dry-run", action="store_true", help="只打印心跳报文，不发送（调试用）")
+    parser.add_argument("--interval", type=int, default=None, help="覆盖心跳周期（秒）")
     parser.add_argument("--verbose", action="store_true", help="DEBUG 日志")
+    parser.add_argument("--version", action="store_true", help="打印版本")
     args = parser.parse_args(argv)
+
+    if args.version:
+        print(__version__)
+        return 0
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -169,24 +228,47 @@ def main(argv=None) -> int:
         cfg = Config()
     except ValueError as e:
         log.error(json.dumps({"event": "config_error", "error": str(e)}, ensure_ascii=False))
-        return 2
+        return EXIT_CONFIG
 
-    log.info(json.dumps({"event": "start", **cfg.as_dict()}, ensure_ascii=False))
+    if args.interval is not None:
+        if args.interval < 1:
+            log.error(json.dumps({"event": "config_error", "error": "--interval 至少 1 秒"}, ensure_ascii=False))
+            return EXIT_CONFIG
+        cfg.interval = args.interval
+
+    log.info(json.dumps({
+        "event": "start", "version": __version__, **cfg.as_dict(),
+    }, ensure_ascii=False))
 
     if args.once:
-        return 0 if run_once(cfg) else 1
+        return EXIT_OK if run_once(cfg, dry_run=args.dry_run) else EXIT_FAILED
 
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT, _handle_term)
+
+    auth_failed = {"v": False}
+
+    def rep(ev):  # noqa: ANN001
+        if not ev.get("ok") and ev.get("http") in (401, 403):
+            auth_failed["v"] = True
+
     while not _stop:
-        run_once(cfg)
+        run_once(cfg, dry_run=args.dry_run, report=rep)
+        if auth_failed["v"]:
+            # 密钥错误：重试无益。以非零码退出，让 systemd StartLimit 把单元
+            # 置为 failed（可见），而不是无声地每周期刷 401 日志。
+            log.error(json.dumps({
+                "event": "auth_failed", "agentId": cfg.agent_id,
+                "error": "管理面返回 401/403：检查 MC_API_KEY 与白名单配置",
+            }, ensure_ascii=False))
+            return EXIT_AUTH
         # 可被信号打断的分片 sleep
         slept = 0.0
         while not _stop and slept < cfg.interval:
             time.sleep(min(1.0, cfg.interval - slept))
             slept += 1.0
     log.info(json.dumps({"event": "stop"}, ensure_ascii=False))
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

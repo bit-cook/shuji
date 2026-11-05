@@ -3,11 +3,16 @@
 /**
  * 端到端模拟验收：不依赖真实微信与企业微信凭证，
  * 用 mock Mission-Control + mock Hermes RPC + 真实 Sidecar 子进程 + 真实 bridge，
- * 复跑部署手册 Phase 09 的 T1–T8 验收用例。
+ * 复跑部署手册 Phase 09 的 T1–T14 验收用例。
  * 运行：node test/e2e.js
+ *
+ * 覆盖：链路 / 安全（白名单、端点鉴权、确认令牌）/ 状态 / 告警 / 恢复 /
+ *       计量 / 调度 / 韧性 / Telegram / 审计留痕 / 企业微信备份链路。
  */
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -18,9 +23,11 @@ const { createMockTelegram } = require('./mock-telegram');
 const { createBridgeFromEnv, listen } = require('../packages/wechat-bridge/src/index');
 const { createHttpAdapter } = require('../packages/wechat-bridge/src/adapters/http');
 const { createRouter } = require('../packages/wechat-bridge/src/core');
+const w = require('../packages/wechat-bridge/src/adapters/wecom');
 
 const SIDECAR = path.join(__dirname, '..', 'packages', 'hermes-sidecar', 'sidecar.py');
 const ALLOW = 'me';
+const BRIDGE_TOKEN = 'e2e-bridge-token';
 
 let passed = 0, failed = 0;
 function report(id, name, ok, detail) {
@@ -29,9 +36,11 @@ function report(id, name, ok, detail) {
   console.log(`[${mark}] ${id} ${name}${detail ? ' — ' + detail : ''}`);
 }
 
-async function postJson(url, obj) {
+async function postJson(url, obj, token = BRIDGE_TOKEN) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = 'Bearer ' + token;
   const res = await fetch(url, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj),
+    method: 'POST', headers, body: JSON.stringify(obj),
   });
   return (await res.json()).reply;
 }
@@ -41,8 +50,8 @@ async function main() {
   const mc = createMockMissionControl({ apiKey: 'e2e-key' });
   const mcServer = await mc.listen(0);
   const MC_BASE = `http://127.0.0.1:${mcServer.address().port}`;
+  const auditFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shuji-e2e-')), 'audit.jsonl');
 
-  let hermesUp = true;
   const hermesServer = http.createServer((req, res) => {
     if (req.url.startsWith('/status')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -57,6 +66,7 @@ async function main() {
     MC_BASE, MC_API_KEY: 'e2e-key',
     WECHAT_ALLOW_FROM: ALLOW,
     ADAPTER: 'http', HOST: '127.0.0.1', PORT: '0',
+    AUDIT_LOG: auditFile, BRIDGE_TOKEN,
   };
   const { router, server } = createBridgeFromEnv(env);
   await new Promise((r) => server.once('listening', r));
@@ -93,14 +103,12 @@ async function main() {
     report('T3', '状态：/list 显示 hermes-node-b 在线', /hermes-node-b \[online\]/.test(list), list.split('\n')[0]);
 
     // T4 告警：Hermes RPC 停掉 → 下个周期转离线
-    hermesUp = false;
     await new Promise((r) => hermesServer.close(r));
     await runSidecar();
     const listOff = await postJson(BRIDGE + '/message', { from: ALLOW, text: '/list' });
     report('T4', '告警：Hermes 停服后 /list 转离线', /hermes-node-b \[offline\]/.test(listOff), listOff.split('\n')[0]);
 
     // T5 恢复：重新拉起 → 恢复 online
-    hermesUp = true;
     const hermesServer2 = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ sessions: 5, version: '0.9.0' }));
@@ -124,7 +132,7 @@ async function main() {
     report('T7', '调度：dispatch 二次确认后任务下发', taskOk, dispatched.slice(0, 60));
 
     // T8 韧性：bridge 进程重启后数据不丢（控制面保持运行）
-    await new Promise((r) => server.close(r));
+    await new Promise((r) => { server.closeAllConnections(); server.close(r); });
     const router2 = createRouter({
       mc: {
         async get(p) {
@@ -141,9 +149,14 @@ async function main() {
     const adapter2 = createHttpAdapter({ router: router2 });
     const server2 = listen({ handler: adapter2.handler, port: 0, host: '127.0.0.1' });
     await new Promise((r) => server2.once('listening', r));
-    const list2 = await postJson(`http://127.0.0.1:${server2.address().port}/message`, { from: ALLOW, text: '/list' });
+    const list2 = await postJson(`http://127.0.0.1:${server2.address().port}/message`, { from: ALLOW, text: '/list' }, '');
     report('T8', '韧性：bridge 重启后 /list 数据仍在', /hermes-node-b \[online\]/.test(list2), list2.split('\n')[0]);
     await new Promise((r) => { server2.closeAllConnections(); server2.close(r); });
+
+    // T11 起：T8 关掉的是旧进程那个实例，这里重新拉一个桥，继续验安全项
+    const bridge3 = createBridgeFromEnv(env);
+    await new Promise((r) => bridge3.server.once('listening', r));
+    const BRIDGE3 = `http://127.0.0.1:${bridge3.server.address().port}`;
 
     // T9 Telegram 入口：长轮询适配器全链路（mock Bot API）
     const tg = createMockTelegram();
@@ -154,7 +167,7 @@ async function main() {
       WECHAT_ALLOW_FROM: '', TELEGRAM_ALLOW_FROM: 'tg-me',
       ADAPTER: 'telegram', TELEGRAM_BOT_TOKEN: 'e2e-token',
       TELEGRAM_API_BASE: `http://127.0.0.1:${tgPort}`,
-      TELEGRAM_DRAIN_BACKLOG: '0',
+      TELEGRAM_DRAIN_BACKLOG: '0', AUDIT_LOG: auditFile,
     };
     const tgBridge = createBridgeFromEnv(tgEnv);
     try {
@@ -172,13 +185,106 @@ async function main() {
       tgBridge.polling.stop();
     }
     await tg.close();
+
+    // T10 审计：每一步（含被拒）都留痕，且 confirm 链路带原文
+    const auditLines = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const results = auditLines.map((e) => e.result);
+    report('T10', '审计：全量留痕（ok / denied / confirm_required / confirm_ok）',
+      results.includes('ok') && results.includes('denied') && results.includes('confirm_required'),
+      `lines=${auditLines.length} results=${[...new Set(results)].join(',')}`);
+    const confirmEntry = auditLines.find((e) => e.result === 'ok' && e.confirmed);
+    report('T10b', '审计：确认执行记录带原命令与通道',
+      !!confirmEntry && confirmEntry.confirmed.includes('/dispatch node-openclaw') && confirmEntry.channel === 'http',
+      confirmEntry ? `channel=${confirmEntry.channel} confirmed=${confirmEntry.confirmed.slice(0, 40)}` : 'missing');
+
+    // T11 端点鉴权：BRIDGE_TOKEN 缺失/错误 401，正确 200
+    {
+      const noTok = await fetch(BRIDGE3 + '/openclaw', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: ALLOW, text: '/ping' }),
+      });
+      const badTok = await fetch(BRIDGE3 + '/openclaw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer nope' },
+        body: JSON.stringify({ from: ALLOW, text: '/ping' }),
+      });
+      const good = await postJson(BRIDGE3 + '/openclaw', { from: ALLOW, text: '/ping' });
+      report('T11', '端点鉴权：BRIDGE_TOKEN 强制 Bearer（缺/错 401，对 200）',
+        noTok.status === 401 && badTok.status === 401 && /^pong/.test(good),
+        `noTok=${noTok.status} badTok=${badTok.status}`);
+    }
+
+    // T12 确认令牌：一次性 + 发起人不一致即拒
+    {
+      const p1 = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: '/dispatch node-a 一次性校验' });
+      const tok = p1.match(/\/confirm ([0-9A-F]{8})/)[1];
+      const used = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: `/confirm ${tok}` });
+      const reused = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: `/confirm ${tok}` });
+      const wrongUser = await postJson(BRIDGE3 + '/message', { from: 'stranger', text: `/confirm ${tok}` });
+      const dispatchedOnce = mc.tasks.filter((t) => t.title === '一次性校验').length;
+      report('T12', '确认令牌：一次性消费 + 非发起人拒绝',
+        /已下发/.test(used) && /确认失败/.test(reused) && dispatchedOnce === 1,
+        `dispatched=${dispatchedOnce} reused=${reused.slice(0, 20)} stranger=${wrongUser.slice(0, 12)}`);
+    }
+
+    // T13 韧性：超大 body / 坏连接之后服务照常
+    {
+      const big = await fetch(BRIDGE3 + '/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + BRIDGE_TOKEN },
+        body: JSON.stringify({ from: ALLOW, text: '/ping', pad: 'x'.repeat(2 * 1024 * 1024) }),
+      });
+      const still = await postJson(BRIDGE3 + '/message', { from: ALLOW, text: '/ping' });
+      report('T13', '韧性：超大请求体被拒后服务照常', big.status === 413 && /^pong/.test(still),
+        `status=${big.status}`);
+      bridge3.server.closeAllConnections();
+      await new Promise((r) => bridge3.server.close(r));
+    }
+
+    // T14 企业微信备份链路：加密消息进 → 加密回复出；伪造签名 400（可选入口）
+    {
+      const TOKEN = 'QDG6eK', CORP = 'wwabc123corp';
+      const AES = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
+      const wecomEnv = {
+        ...process.env,
+        MC_BASE, MC_API_KEY: 'e2e-key', WECHAT_ALLOW_FROM: ALLOW, AUDIT_LOG: auditFile,
+        ADAPTER: 'wecom', HOST: '127.0.0.1', PORT: '0',
+        WECOM_TOKEN: TOKEN, WECOM_ENCODING_AES_KEY: AES, WECOM_CORP_ID: CORP,
+      };
+      const wb = createBridgeFromEnv(wecomEnv);
+      await new Promise((r) => wb.server.once('listening', r));
+      try {
+        const url = `http://127.0.0.1:${wb.server.address().port}/callback`;
+        const ts = String(Math.floor(Date.now() / 1000)), nonce = 'n1';
+        const inner = '<xml><FromUserName><![CDATA[' + ALLOW + ']]></FromUserName>' +
+          '<MsgType><![CDATA[text]]></MsgType><Content><![CDATA[/ping]]></Content></xml>';
+        const enc = w.encryptMsg({ aesKey: w.aesKeyFrom(AES), corpId: CORP, text: inner });
+        const body = '<xml><Encrypt><![CDATA[' + enc + ']]></Encrypt></xml>';
+        const sig = w.signature({ token: TOKEN, timestamp: ts, nonce, encrypt: enc });
+        const res = await fetch(`${url}?msg_signature=${sig}&timestamp=${ts}&nonce=${nonce}`, {
+          method: 'POST', body,
+        });
+        const replyEnc = w.extractTag(await res.text(), 'Encrypt');
+        const replyText = w.decryptMsg({ aesKey: w.aesKeyFrom(AES), corpId: CORP, base64: replyEnc });
+        const forged = await fetch(`${url}?msg_signature=forged&timestamp=${ts}&nonce=${nonce}`, {
+          method: 'POST', body,
+        });
+        report('T14', '企微备份链路：加解密往返 + 伪造签名 400',
+          res.status === 200 && /^pong/.test(replyText) && forged.status === 400,
+          `status=${res.status} forged=${forged.status}`);
+      } finally {
+        wb.server.closeAllConnections();
+        await new Promise((r) => wb.server.close(r));
+      }
+    }
   } finally {
     await new Promise((r) => { mcServer.closeAllConnections(); mcServer.close(r); });
+    fs.rmSync(path.dirname(auditFile), { recursive: true, force: true });
   }
 
   console.log(`\n结果：${passed} 通过 / ${failed} 失败（共 ${passed + failed} 项）`);
-  console.log('说明：本验收用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器）；');
-  console.log('真实企业微信回调路径由 packages/wechat-bridge/test/wecom-crypto.test.js 的真服务器加解密测试覆盖。');
+  console.log('说明：本验收用 mock 控制面 + mock Hermes RPC 模拟微信入口（HTTP 适配器 /openclaw，带 Bearer）；');
+  console.log('      Telegram 走长轮询适配器；企业微信备份链路由 T14 覆盖。均无需真实凭证。');
   process.exit(failed === 0 ? 0 : 1);
 }
 

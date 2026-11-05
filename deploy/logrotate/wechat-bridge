@@ -1,0 +1,14 @@
+# 枢机审计日志轮转（bridge 自带 10MB 轮转，这里再兜一层防写满磁盘）
+# 安装：sudo cp deploy/logrotate/wechat-bridge /etc/logrotate.d/wechat-bridge
+# 说明：bridge 每次审计都是按路径 appendFileSync，logrotate 改名后下一条自动写新文件，
+#      因此不需要给进程发信号（ bridge 不处理 HUP，发信号反而会杀掉它）。
+/var/log/wechat-bridge/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 wechat-bridge wechat-bridge
+}

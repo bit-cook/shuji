@@ -9,6 +9,10 @@ EnvironmentFile=/etc/wechat-bridge.env
 ExecStart=/usr/bin/node /opt/wechat-bridge/src/cli.js
 Restart=on-failure
 RestartSec=8
+# 启动即失败（如绑定被拒）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStopSec=20
 # 最小权限（红线：禁止 root 常驻）
 User=wechat-bridge
 Group=wechat-bridge

@@ -1,10 +1,15 @@
 {
   "id": "cardinal-bridge",
   "name": "Cardinal Bridge",
-  "description": "把 /ping /list 等 Cardinal 命令从聊天通道转给枢机控制面，不调模型；非命令消息照常走 AI",
-  "categories": ["other"],
+  "description": "把 /ping /list 等 Cardinal 命令从聊天通道（微信 ClawBot / Telegram 等）转给枢机控制面，不调模型；非命令消息照常走 AI",
+  "categories": [
+    "other"
+  ],
   "contracts": {
-    "hooks": ["before_agent_reply"]
+    "hooks": [
+      "message_received",
+      "before_agent_reply"
+    ]
   },
   "activation": {
     "onStartup": true
@@ -26,6 +31,8 @@
         "description": "调用枢机的超时毫秒数，默认 10000"
       }
     },
-    "required": ["cardinalBase"]
+    "required": [
+      "cardinalBase"
+    ]
   }
 }

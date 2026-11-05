@@ -52,7 +52,7 @@ test('加解密往返一致且校验 AppID', () => {
 
 test('GET 回调 URL 验证：解出 echostr', () => {
   const echostr = w.encryptMsg({ aesKey, corpId: CORP, text: 'hello-verify' });
-  const ts = '1700000000', nonce = 'n1';
+  const ts = String(Math.floor(Date.now() / 1000)), nonce = 'n1';
   const adapter = w.createWecomAdapter({
     token: TOKEN, encodingAesKey: AES, corpId: CORP, router: { handle: async () => 'x' },
   });
@@ -63,6 +63,33 @@ test('GET 回调 URL 验证：解出 echostr', () => {
   assert.throws(() => adapter.verifyUrl({
     msg_signature: 'bad', timestamp: ts, nonce, echostr,
   }), /验签失败/);
+});
+
+test('过期回调被时间窗拒绝（重放防护）', () => {
+  const echostr = w.encryptMsg({ aesKey, corpId: CORP, text: 'hello-verify' });
+  const stale = String(Math.floor(Date.now() / 1000) - 3600), nonce = 'n1';
+  const adapter = w.createWecomAdapter({
+    token: TOKEN, encodingAesKey: AES, corpId: CORP, router: { handle: async () => 'x' },
+  });
+  assert.throws(() => adapter.verifyUrl({
+    msg_signature: w.signature({ token: TOKEN, timestamp: stale, nonce, encrypt: echostr }),
+    timestamp: stale, nonce, echostr,
+  }), /时间窗/);
+  // 显式关闭时间窗时放行（兼容时钟严重偏移的部署）
+  const relaxed = w.createWecomAdapter({
+    token: TOKEN, encodingAesKey: AES, corpId: CORP, router: { handle: async () => 'x' },
+    timestampWindowSec: 0,
+  });
+  assert.equal(relaxed.verifyUrl({
+    msg_signature: w.signature({ token: TOKEN, timestamp: stale, nonce, encrypt: echostr }),
+    timestamp: stale, nonce, echostr,
+  }), 'hello-verify');
+});
+
+test('XML 实体被反转义（命令里的 & < > 可用）', () => {
+  assert.equal(w.unescapeXml('a &amp; b &lt;c&gt; &quot;d&quot; &#65;'), 'a & b <c> "d" A');
+  assert.equal(w.extractTag('<xml><Content><![CDATA[/status a&amp;b]]></Content></xml>', 'Content'), '/status a&b');
+  assert.equal(w.extractTag('<xml><Content>/status a&amp;b</Content></xml>', 'Content'), '/status a&b');
 });
 
 function inboundXml(inner, token, ts, nonce) {
@@ -85,7 +112,7 @@ test('完整回调：加密文本消息进 → 加密回复出（真服务器）
 
   // /ping
   {
-    const ts = '1700000001', nonce = 'nA';
+    const ts = String(Math.floor(Date.now() / 1000)), nonce = 'nA';
     const inner = '<xml><ToUserName><![CDATA[' + CORP + ']]></ToUserName><FromUserName><![CDATA[me]]></FromUserName>' +
       '<CreateTime>1700000001</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[/ping]]></Content>' +
       '<MsgId>1</MsgId><AgentID>1000002</AgentID></xml>';
@@ -105,7 +132,7 @@ test('完整回调：加密文本消息进 → 加密回复出（真服务器）
 
   // 非白名单用户
   {
-    const ts = '1700000002', nonce = 'nB';
+    const ts = String(Math.floor(Date.now() / 1000)), nonce = 'nB';
     const inner = '<xml><FromUserName><![CDATA[stranger]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[/list]]></Content></xml>';
     const { body, sig } = inboundXml(inner, TOKEN, ts, nonce);
     const res = await fetch(`http://127.0.0.1:${port}/callback?msg_signature=${sig}&timestamp=${ts}&nonce=${nonce}`, {
@@ -117,7 +144,7 @@ test('完整回调：加密文本消息进 → 加密回复出（真服务器）
 
   // 验签失败的消息必须 400
   {
-    const ts = '1700000003', nonce = 'nC';
+    const ts = String(Math.floor(Date.now() / 1000)), nonce = 'nC';
     const inner = '<xml><FromUserName><![CDATA[me]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[/ping]]></Content></xml>';
     const { body } = inboundXml(inner, TOKEN, ts, nonce);
     const res = await fetch(`http://127.0.0.1:${port}/callback?msg_signature=forged&timestamp=${ts}&nonce=${nonce}`, {
@@ -128,7 +155,7 @@ test('完整回调：加密文本消息进 → 加密回复出（真服务器）
 
   // /list 走通（验证 router 与 adapter 的完整串联）
   {
-    const ts = '1700000004', nonce = 'nD';
+    const ts = String(Math.floor(Date.now() / 1000)), nonce = 'nD';
     const inner = '<xml><FromUserName><![CDATA[me]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[/list]]></Content></xml>';
     const { body, sig } = inboundXml(inner, TOKEN, ts, nonce);
     const res = await fetch(`http://127.0.0.1:${port}/callback?msg_signature=${sig}&timestamp=${ts}&nonce=${nonce}`, {
