@@ -62,7 +62,12 @@ jobs:
         run: |
           node packages/mission-control/src/cli.js --version
           node packages/mission-control/src/cli.js --help
-          node packages/mission-control/src/cli.js --check; test $? -eq 2   # 无 MC_API_KEY 必须拒绝
+          # 缺 MC_API_KEY 必须拒绝（退出码 2）。用 if 包一层：
+          # GitHub Actions 的 run 默认 bash -e，裸跑失败命令会让整个 step 提前中止。
+          if node packages/mission-control/src/cli.js --check; then
+            echo "::error::缺 MC_API_KEY 时 --check 应当失败，实际却通过了"
+            exit 1
+          fi
           MC_API_KEY=$(printf 'k%.0s' $(seq 32)) MC_DB=/tmp/mc-ci.db \
             node packages/mission-control/src/cli.js --check
       - run: node --test packages/mission-control/test/*.test.js
