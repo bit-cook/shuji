@@ -89,6 +89,13 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
   if (env.MC_HOST !== undefined && String(env.MC_HOST).trim() === '') {
     warnings.push('MC_HOST 为空，按 127.0.0.1 处理（不会绑通配地址）');
   }
+  // MC_HOST 可以是逗号分隔的多个地址：本机组件走回环、外部联调走公网网卡，
+  // 两条路同时活着。绑定具体公网地址不会触发通配地址红线，所以这里逐个校验。
+  const hosts = host.split(',').map((h) => h.trim()).filter(Boolean);
+  if (hosts.length === 0) hosts.push(DEFAULTS.host);
+  if (hosts.length > 1 && hosts.some((h) => isPublicHost(h))) {
+    errors.push('MC_HOST 混用通配地址与具体地址没有意义：通配地址已覆盖全部网卡，请只留它');
+  }
   if (!isNumericLiteral(env.MC_PORT)) errors.push(`MC_PORT 不是数字：${env.MC_PORT}`);
   const port = Math.floor(num(env.MC_PORT, DEFAULTS.port));
   if (!(port > 0 && port < 65536)) errors.push(`MC_PORT 非法：${env.MC_PORT}`);
@@ -170,6 +177,7 @@ function parseConfig(env = process.env, { cwd = process.cwd() } = {}) {
   return {
     config: {
       host,
+      hosts,
       port,
       apiKey,
       dbPath,

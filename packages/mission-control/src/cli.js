@@ -115,7 +115,9 @@ function main(argv = process.argv.slice(2)) {
   const { config, warnings } = mc;
   process.stdout.write([
     `枢机 · Mission-Control 已启动`,
-    `  监听     http://${config.host}:${config.port}`,
+    ...(config.hosts && config.hosts.length > 1
+      ? config.hosts.map((h) => `  监听     http://${h}:${config.port}`)
+      : [`  监听     http://${config.host}:${config.port}`]),
     `  数据库   ${config.dbPath}`,
     `  审计     ${config.auditFile === 'none' ? '（已关闭）' : config.auditFile}`,
     `  心跳超时 ${config.staleSec}s 后 /list 报 offline`,
@@ -123,7 +125,7 @@ function main(argv = process.argv.slice(2)) {
     ...(warnings.length ? warnings.map((w) => '  [warn] ' + w) : []),
   ].join('\n') + '\n');
 
-  mc.listen(config.port, config.host).catch((e) => {
+  mc.listen(config.port, config.hosts || config.host).catch((e) => {
     process.stderr.write('[fail] 监听失败：' + (e && e.message ? e.message : String(e)) + '\n');
     process.exit(1);
   });

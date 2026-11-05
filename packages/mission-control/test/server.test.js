@@ -396,3 +396,71 @@ describe('审计', () => {
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   });
 });
+
+describe('多地址监听', () => {
+  test('MC_HOST 给多个地址时，每个地址都能服务同一个控制面', async () => {
+    // 本机组件（Sidecar 心跳、桥的命令转发）走回环，外部联调走公网网卡。
+    // 只听一个地址时，另一条路上的组件会静默断线——日志里只有连接错误，
+    // 而服务本身是「正常」起来的。
+    const cfg = { ...BASE_CFG, hosts: ['127.0.0.1', '127.0.0.2'] };
+    const s = createControlServer({
+      config: cfg,
+      store: createStore({ dbPath: path.join(tmpDir, 'multi.db'), now: () => Date.now() }),
+      logger: createNoopLogger(),
+      stats: createStats(),
+      audit: createAudit({ file: 'none' }),
+      rateLimiter: createRateLimiter({ perMinute: 600, burst: 200 }),
+      now: () => Date.now(),
+    });
+    await s.listen(0, cfg.hosts);
+    try {
+      for (const host of cfg.hosts) {
+        const url = `http://${host}:${s.server.address().port}`;
+        const res = await fetch(url + '/healthz');
+        assert.equal(res.status, 200, `${host} 上应能访问：${url}`);
+      }
+    } finally {
+      await s.close();
+    }
+  });
+
+  test('多地址中有一个绑不上时整体启动失败，不留半开状态', async () => {
+    // 半开状态比启动失败更难查：已绑好的地址继续服务，运维看到的是「起来了」。
+    const cfg = { ...BASE_CFG, hosts: ['127.0.0.1', '203.0.113.7'] };
+    const s = createControlServer({
+      config: cfg,
+      store: createStore({ dbPath: path.join(tmpDir, 'halfopen.db'), now: () => Date.now() }),
+      logger: createNoopLogger(),
+      stats: createStats(),
+      audit: createAudit({ file: 'none' }),
+      rateLimiter: createRateLimiter({ perMinute: 600, burst: 200 }),
+      now: () => Date.now(),
+    });
+    // 先单独绑第一个地址拿到确定端口，再用同一端口做多地址绑定
+    await s.listen(0, '127.0.0.1');
+    const port = s.server.address().port;
+    await s.close();
+    await assert.rejects(() => s.listen(port, cfg.hosts), /EADDRNOTAVAIL|ENETUNREACH|EACCES/);
+    // 回滚后第一个地址不应继续服务
+    const still = await fetch(`http://127.0.0.1:${port}/healthz`).catch(() => null);
+    assert.ok(still === null || still.status >= 400, '回滚后第一个地址不应继续服务');
+    await s.close();
+  });
+
+  test('host 传单个字符串时行为不变', async () => {
+    const cfg = { ...BASE_CFG };
+    const s = createControlServer({
+      config: cfg,
+      store: createStore({ dbPath: path.join(tmpDir, 'single.db'), now: () => Date.now() }),
+      logger: createNoopLogger(),
+      stats: createStats(),
+      audit: createAudit({ file: 'none' }),
+      rateLimiter: createRateLimiter({ perMinute: 600, burst: 200 }),
+      now: () => Date.now(),
+    });
+    await s.listen(0, '127.0.0.1');
+    const res = await fetch(`http://127.0.0.1:${s.server.address().port}/healthz`);
+    assert.equal(res.status, 200);
+    await s.close();
+  });
+});

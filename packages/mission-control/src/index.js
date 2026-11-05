@@ -87,7 +87,7 @@ function createMissionControl({
     http,
     panel: http.panel,
     warnings,
-    listen: (port = config.port, host = config.host) => http.listen(port, host),
+    listen: (port = config.port, host = config.hosts || config.host) => http.listen(port, host),
     close: async () => {
       await http.close();
       store.close();

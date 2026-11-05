@@ -337,13 +337,21 @@ function createControlServer({
     });
   }
 
-  const server = httpImpl.createServer(handler);
-  // 裸 TCP 写半个请求就断开的场景：不让 error 事件打崩进程
-  server.on('clientError', (err, socket) => {
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
-    log.debug('clientError', { error: String(err && err.message || err) });
-  });
-  server.on('error', (err) => log.error('server error', { error: String(err && err.message || err) }));
+  // 一个 http.Server 实例只能 listen 一次（Node 对重复 listen 直接抛错），
+  // 所以多地址监听要为每个地址各建一个实例，共享同一个 handler。
+  const servers = [];
+  function newServer() {
+    const s = httpImpl.createServer(handler);
+    // 裸 TCP 写半个请求就断开的场景：不让 error 事件打崩进程
+    s.on('clientError', (err, socket) => {
+      if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      log.debug('clientError', { error: String(err && err.message || err) });
+    });
+    s.on('error', (err) => log.error('server error', { error: String(err && err.message || err) }));
+    servers.push(s);
+    return s;
+  }
+  const server = newServer();
 
   return {
     server,
@@ -352,20 +360,48 @@ function createControlServer({
     stats: counter,
     audit: recorder,
     routes: routes.map(([m, p]) => `${m} ${p}`),
-    listen: (port, host) => new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => {
-        server.removeListener('error', reject);
-        const addr = server.address();
-        log.info('listening', { host: host, port: addr && addr.port, pid: process.pid });
-        resolve(server);
+    // host 可以是字符串或字符串数组：本机组件走回环、外部联调走公网网卡，
+    // 两条路同时活着。改成只听一个地址时，原先走另一条路的本机组件会静默断线——
+    // Sidecar 的心跳、桥的命令转发都是这样失败的，日志里只有连接错误。
+    listen: (port, host) => {
+      const list = (Array.isArray(host) ? host : [host]).filter((h) => h !== undefined && h !== null && h !== '');
+      const targets = list.length > 0 ? list : ['127.0.0.1'];
+      const bound = [];
+      // port 为 0（测试/临时）时，第一个地址定下端口，其余地址必须沿用同一个：
+      // 各绑各的随机端口，多地址就变成了多个互不相干的服务。
+      let actualPort = port;
+      return (async () => {
+        for (let i = 0; i < targets.length; i++) {
+          const s = i === 0 ? server : newServer();
+          // eslint-disable-next-line no-await-in-loop -- 地址按顺序绑，任一失败即整体回滚
+          await new Promise((resolve, reject) => {
+            s.once('error', reject);
+            s.listen(actualPort, targets[i], () => {
+              s.removeListener('error', reject);
+              if (port === 0) actualPort = s.address().port;
+              log.info('listening', { host: targets[i], port: actualPort, pid: process.pid });
+              bound.push(s);
+              resolve();
+            });
+          });
+        }
+        return server;
+      })().catch((e) => {
+        // 有一个地址绑不上就整体失败：半开状态下已绑好的地址会继续服务，
+        // 而运维看到的是「服务起来了」，比启动失败更难排查。
+        for (const s of bound) {
+          try { s.close(); } catch { /* 已关闭 */ }
+        }
+        servers.length = 0;
+        servers.push(server);
+        throw e;
       });
-    }),
-    close: () => new Promise((resolve) => {
-      server.close(() => resolve());
-      if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+    },
+    close: () => Promise.all(servers.map((s) => new Promise((resolve) => {
+      s.close(() => resolve());
+      if (typeof s.closeAllConnections === 'function') s.closeAllConnections();
       setTimeout(resolve, 3000).unref();
-    }),
+    }))).then(() => {}),
   };
 }
 
