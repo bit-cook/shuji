@@ -51,17 +51,18 @@ services:
     tmpfs: [/tmp]
 
   # 命令路由 · Telegram 入口（长轮询，无需公网地址）。
-  # 与上面共用 env 文件，仅切换 ADAPTER 并注入机器人令牌。
+  # 独立 env 文件：白名单、审计、令牌与 HTTP 入口互不干扰。
   wechat-bridge-telegram:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile.bridge
-    env_file: ./env/wechat-bridge.env
+    env_file: ./env/wechat-bridge-telegram.env   # 机器人令牌只在这里，别处不重复
     environment:
+      # 令牌与白名单、审计路径都来自 env_file（不要在这里再写一遍 TELEGRAM_BOT_TOKEN，
+      # environment 会覆盖 env_file，等于要求同一个密钥在两个地方各存一份）
       MC_BASE: http://mission-control:3000
       ADAPTER: telegram
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?需要在 deploy/.env 里配置 TELEGRAM_BOT_TOKEN}
-      AUDIT_LOG: /var/log/wechat-bridge/audit.jsonl
+      AUDIT_LOG: /var/log/wechat-bridge/telegram-audit.jsonl
     volumes:
       - bridge-logs-telegram:/var/log/wechat-bridge
     depends_on:

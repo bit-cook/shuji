@@ -23,7 +23,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# 落盘 + 建最小权限账号的组件
 COMPONENTS=(mission-control wechat-bridge hermes-sidecar)
+# systemd 单元比组件多一个：Telegram 入口与 HTTP 入口共用 wechat-bridge 账号、
+# 同一份代码与日志目录，只有环境文件（令牌 / 白名单 / 审计文件名）不同——
+# 一个进程只跑一个适配器，所以必须是两个单元，但不必多一个账号。
+SERVICES=(mission-control wechat-bridge wechat-bridge-telegram hermes-sidecar)
 
 run() { if [[ $DRY_RUN -eq 1 ]]; then echo "[dry-run] $*"; else "$@"; fi }
 confirm() {
@@ -35,9 +40,9 @@ confirm() {
 # ---------------- 卸载 ----------------
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "== 枢机卸载（目标：$DEST）=="
-  confirm "停止并禁用 ${COMPONENTS[*]} 服务？" || { echo "已取消"; exit 0; }
-  run systemctl disable --now "${COMPONENTS[@]}" || true
-  for unit in "${COMPONENTS[@]}"; do
+  confirm "停止并禁用 ${SERVICES[*]} 服务？" || { echo "已取消"; exit 0; }
+  run systemctl disable --now "${SERVICES[@]}" || true
+  for unit in "${SERVICES[@]}"; do
     run rm -f "/etc/systemd/system/$unit.service"
   done
   run systemctl daemon-reload
@@ -45,7 +50,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   for c in "${COMPONENTS[@]}"; do run rm -rf "$DEST/$c"; done
   run rm -f /etc/logrotate.d/wechat-bridge /etc/logrotate.d/mission-control
   echo "已完成。系统账号 ${COMPONENTS[*]} 未删除（如需：userdel）。"
-  echo "环境文件 /etc/{$(IFS=,; echo "${COMPONENTS[*]}")}.env 未删除（含密钥，请自行处置）。"
+  echo "环境文件 /etc/{$(IFS=,; echo "${SERVICES[*]}")}.env 未删除（含密钥，请自行处置）。"
   exit 0
 fi
 
@@ -73,8 +78,9 @@ run cp -r "$REPO_ROOT/packages/wechat-bridge/src" "$REPO_ROOT/packages/wechat-br
 run cp "$REPO_ROOT/packages/hermes-sidecar/sidecar.py" "$DEST/hermes-sidecar/"
 run chmod 644 "$DEST/hermes-sidecar/sidecar.py"
 
-# 3. systemd 单元（路径按 DEST 重写）
-for unit in "${COMPONENTS[@]}"; do
+# 3. systemd 单元（路径按 DEST 重写）。Telegram 入口共用 wechat-bridge 账号，
+#    但它自己的单元里 User=wechat-bridge 已写死，这里只换路径前缀。
+for unit in "${SERVICES[@]}"; do
   if [[ $DRY_RUN -eq 1 ]]; then
     echo "[dry-run] 生成 /etc/systemd/system/$unit.service（路径前缀 $DEST）"
   else
@@ -103,7 +109,7 @@ run chmod 750 /var/lib/mission-control
 echo
 echo "== 启动前自检 =="
 FAIL=0
-for name in "${COMPONENTS[@]}"; do
+for name in "${SERVICES[@]}"; do
   envfile="/etc/$name.env"
   if [[ ! -f "$envfile" ]]; then
     echo "  [缺失] $envfile —— 请从 $REPO_ROOT/deploy/env/$name.env.example 复制"
@@ -136,6 +142,6 @@ echo
 echo "接下来："
 echo "  1. 如自检有缺失：cp $REPO_ROOT/deploy/env/<组件>.env.example /etc/<组件>.env && chmod 600 /etc/<组件>.env"
 echo "  2. systemctl enable --now mission-control            # 先起控制面"
-echo "  3. systemctl enable --now wechat-bridge hermes-sidecar"
-echo "  4. journalctl -u mission-control -u wechat-bridge -u hermes-sidecar -f"
+echo "  3. systemctl enable --now wechat-bridge wechat-bridge-telegram hermes-sidecar"
+echo "  4. journalctl -u mission-control -u wechat-bridge -u wechat-bridge-telegram -u hermes-sidecar -f"
 echo "  5. 校验监听未暴露公网：ss -tlnp | grep -E '3000|8080'"

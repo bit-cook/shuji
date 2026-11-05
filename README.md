@@ -75,7 +75,7 @@
 ## 快速开始（本地 3 分钟跑通验收）
 
 ```bash
-# 0. 单测：bridge 80 项 + 控制面 92 项 + sidecar 25 项 + 插件 22 项
+# 0. 单测：bridge 86 项 + 控制面 92 项 + sidecar 25 项 + 插件 22 项
 npm test
 
 # 1. 端到端验收 T1–T22（mock 控制面 + mock Hermes + mock Telegram + 真 sidecar 子进程
@@ -112,7 +112,7 @@ MC_BASE=http://127.0.0.1:3000 MC_API_KEY=<控制面的值> \
 
 ```bash
 cd deploy
-for c in mission-control wechat-bridge hermes-sidecar; do
+for c in mission-control wechat-bridge wechat-bridge-telegram hermes-sidecar; do
   cp env/$c.env.example env/$c.env && chmod 600 env/$c.env
 done
 docker compose up -d                              # 控制面 + HTTP 路由 + Telegram 路由
@@ -128,17 +128,21 @@ OpenClaw 主机按 `packages/openclaw-cardinal-plugin/README.md` link 插件并�
 本机（Hermes 与 OpenClaw 都以 **systemd 用户单元**运行的机器）可用另一套：
 
 ```bash
-for u in mission-control wechat-bridge hermes-sidecar; do
+for u in mission-control wechat-bridge wechat-bridge-telegram hermes-sidecar; do
   cp deploy/systemd-user/$u.service ~/.config/systemd/user/cardinal-$u.service
 done
-systemctl --user enable --now cardinal-mission-control cardinal-wechat-bridge cardinal-hermes-sidecar
+systemctl --user enable --now cardinal-mission-control \
+  cardinal-wechat-bridge cardinal-wechat-bridge-telegram cardinal-hermes-sidecar
+
+# 不知道自己的 Telegram 数字用户 ID？跑这个，给机器人发一句话，它自动补白名单并起服务：
+#   bash deploy/wait-telegram-sender.sh
 ```
 
 完整 11 阶段手册：[部署手册](https://osome.work/cardinal-plan/docs/runbook.html)。
 
 ## 测试现状（每次提交由 CI 复跑）
 
-- `wechat-bridge`：80 项 `node:test`（白名单 / 二次确认 / 审计与轮转 / 限流 / HTTP 鉴权与韧性 / 企业微信回调加解密往返 / Telegram 长轮询 / 配置与公网绑定红线 / MC 客户端重试）
+- `wechat-bridge`：86 项 `node:test`（白名单 / 二次确认 / 审计与轮转 / 限流 / HTTP 鉴权与韧性 / 企业微信回调加解密往返 / Telegram 长轮询 / 配置与公网绑定红线 / MC 客户端重试 / **单入口白名单漏配与开关拼错的告警**）
 - `mission-control`：92 项 `node:test`（报文归一化含秒/毫厘单位 / 心跳超时纠偏 / 任务状态机与重复领取 / 每 Agent 任务裁剪 / 成本合并 / 持久化 / 路由匹配 / Bearer / 413·429·裸 TCP 韧性 / 审计不含密钥）
 - `hermes-sidecar`：25 项 `unittest`（心跳报文与鉴权头、401 快速失败、500 重试、systemd 退化**含用户级单元自动识别**、CLI 退出码、dry-run、退避抖动）
 - `openclaw-cardinal-plugin`：22 项 `node:test` + 对真实 openclaw SDK 的 `tsc --noEmit` 零错误

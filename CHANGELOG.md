@@ -41,6 +41,37 @@
   这两个键属于 `[Unit]` 段，写在 `[Service]` 里被静默忽略——「启动即失败不要无限重启」
   这道防护一直是空转。六个单元文件全部改正，`systemd-analyze verify` 现已无警告。
 
+
+### 新增：Telegram 第二入口（实跑接线）
+
+- `deploy/env/wechat-bridge-telegram.env(.example)`：Telegram 入口独立环境文件——
+  与 HTTP/微信入口分开跑，白名单、审计文件、令牌互不干扰（两个适配器同时运行）
+- `deploy/systemd-user/wechat-bridge-telegram.service`（用户作用域）与
+  `deploy/systemd/wechat-bridge-telegram.service`（系统作用域，`User=wechat-bridge`）：
+  一个进程只跑一个适配器，所以 Telegram 入口必须是独立单元；它与 HTTP 入口共用
+  同一账号、同一份代码与日志目录，只换环境文件——少一个账号就少一处要维护的权限
+- `deploy/wait-telegram-sender.sh`：不知道自己的 Telegram 数字 user_id 时跑它——
+  给机器人发一句话，脚本自动把 ID 写进 `TELEGRAM_ALLOW_FROM`、装并起服务、
+  回一条确认消息。令牌从环境文件读，换机器人只改一处
+- `install.sh` 拆出 `SERVICES`（4 个 systemd 单元）与 `COMPONENTS`（3 个落盘组件）：
+  之前「接下来」那行提示 `systemctl enable --now wechat-bridge-telegram`，
+  而这个单元从来没被安装过——照做会得到 `Failed to connect to bus` / 单元不存在。
+  自检清单现在也覆盖 Telegram 环境文件（白名单占位值、权限 600）
+- docker-compose 的 Telegram 服务改用独立 env 文件，并删掉 `environment` 里的
+  `TELEGRAM_BOT_TOKEN` 覆盖——compose 的 `environment` 优先级高于 `env_file`，
+  留着它等于要求同一个密钥在 `deploy/.env` 里再存一份
+- `logrotate/wechat-bridge` 从单文件改为 `/var/log/wechat-bridge/*.jsonl`：
+  之前只轮转 `audit.jsonl`，Telegram 入口的 `telegram-audit.jsonl` 没人管
+
+### 修复：配置装配的两类「配了却没生效」
+
+- `validateConfig` 现在对**当前适配器的白名单为空、另一个入口却配了**的情况给警告。
+  一个进程只跑一个适配器，白名单取并集不会越权（微信消息到不了 Telegram 适配器），
+  但「配了另一个入口、当前入口是空的」会让服务正常启动、然后每一个真实用户都被拒——
+  比启动失败更难发现
+- `TELEGRAM_VALIDATE_TOKEN` / `TELEGRAM_DRAIN_BACKLOG` 拼成 `yes` / `true` / `on`
+  时不再静默按默认值走（令牌错了不校验、积压消息该丢不丢），启动即报错
+
 ### 部署
 
 - 新增 `deploy/Dockerfile.mission-control`（Node 24、非 root、fetch 健康检查）、

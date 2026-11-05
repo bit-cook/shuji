@@ -1,0 +1,30 @@
+[Unit]
+Description=Shuji WeChat Command Bridge (Telegram 入口)
+After=network-online.target mission-control.service
+Wants=network-online.target
+
+# 启动即失败（如令牌错、白名单空）不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wechat-bridge-telegram.env
+ExecStart=/usr/bin/node /opt/wechat-bridge/src/cli.js
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+# 与 HTTP 入口共用 wechat-bridge 账号：同一份代码、同一个日志目录，
+# 只有环境文件（令牌 / 白名单 / 审计文件名）不同——少一个账号就少一处要维护的权限。
+User=wechat-bridge
+Group=wechat-bridge
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/wechat-bridge
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

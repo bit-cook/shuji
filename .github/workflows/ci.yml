@@ -105,6 +105,12 @@ jobs:
               echo "== $u"
               systemd-analyze verify "$u" || echo "::warning file=$u::systemd-analyze 有警告（路径类告警可忽略）"
             done
+            # 用户作用域那套（Hermes 与 OpenClaw 都以 --user 单元运行的机器）也得校验，
+            # 否则新加的用户单元（如 Telegram 入口）写错了没人知道。
+            for u in deploy/systemd-user/*.service; do
+              echo "== $u"
+              systemd-analyze verify --user "$u" || echo "::warning file=$u::systemd-analyze --user 有警告"
+            done
           else
             echo "systemd-analyze 不可用，跳过"
           fi
